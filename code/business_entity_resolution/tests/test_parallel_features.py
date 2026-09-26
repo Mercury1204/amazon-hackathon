@@ -60,6 +60,14 @@ def _make_dataset(root: Path):
     )
     pairs.to_parquet(pairs_dir / "train_pairs.parquet", index=False)
 
+    # The candidate set the pairs were sampled from. The degree features are derived
+    # from this, not from the sampled pairs, so the fixture must provide it.
+    candidates_dir = root / "candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    pairs.drop(columns=["label"]).to_parquet(
+        candidates_dir / "train_candidates.parquet", index=False
+    )
+
     for source, frame in ((1, s1), (2, s2), (3, s3)):
         raw = pd.DataFrame(
             {

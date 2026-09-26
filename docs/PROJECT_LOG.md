@@ -100,5 +100,27 @@ Not verified here: `run_block`, `run_prepare`, `write_training_pairs` and
 `generate_candidates` and `run_features` paths are covered end-to-end by real DuckDB in
 `test_audit.py`, `test_blocking.py` and `test_parallel_features.py`.
 
-Dataset integrity re-verified before planning the Kaggle upload: all 7 row counts and file sizes
-match `DATASET.md` exactly, and UTF-8 is intact (Devanagari and French-accented names round-trip).
+## 2026-09-27 — degree-feature skew and cache provenance
+
+No production numbers were regenerated; both changes invalidate the current model.
+
+| Step | Change | Result |
+|---|---|---|
+| Degree fix | `features.candidate_degree_tables` | `s1_degree` / `cand_degree` now derive from `candidates/{meta_split}_candidates.parquet` instead of the split's pair file, closing a train/serve skew where the same feature meant ~5-20 at training and up to 200 at inference (F20/D16). Cached, since each is a pure function of the candidate set. Phase 1 also stops aggregating the 250.6M-row test pair table |
+| Cache provenance | `ber/cache.py` | Every artifact gets a `<artifact>.meta.json` fingerprint over its input-file identity, the relevant config keys, and the source of the computing modules. Producers recompute on mismatch; `predict` refuses stale feature parts (F21/D17) |
+| Ordering fix | `predict.run_predict` | Feature-provenance check now runs before the model load and the decision lookup, so the actionable "re-run `features`" error fires first |
+| Tests | `pytest -q` | **120 passed** (was 101). New: `test_cache.py` (15), `test_feature_provenance.py` (4) |
+
+Two of my own bugs surfaced while testing this and were fixed: the degree tables were written without
+creating `reports/`, and `_feature_sources` could not know that a `valfull` feature set borrows the
+train metadata, so it computed a different fingerprint than the producer. The artifact now records
+its `meta_split` in a `context` field excluded from the fingerprint.
+
+`test_parallel_features.py` gained a candidates file in its fixture, since the degree features now
+require one.
+
+**Outstanding:** the committed `models/lgbm.txt`, `models/threshold.json` and the reported 0.8488 were
+all produced with the skewed degree features. A full recompute — `features` -> `train` -> `tune` ->
+`predict` -> `outputs` — is required before any number here is quoted again. That recompute is best
+done as the first Kaggle run, which is why these two fixes were made before the data upload
+completed rather than after.

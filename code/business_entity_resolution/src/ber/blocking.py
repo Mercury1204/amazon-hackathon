@@ -6,6 +6,10 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+import ber.address as ber_address
+import ber.normalize as ber_normalize
+import ber.translit as ber_translit
+from ber.cache import code_stamp, describe_staleness, is_fresh, stamp, stamps, write_meta
 from ber.duck import connect
 
 DEFAULT_PASS_CAPS = {1: 5000, 3: 200, 4: 2000, 5: 1000, 6: 50, 7: 500, 8: 300, 9: 100, 10: 30}
@@ -190,48 +194,68 @@ def _write_keys_chunked(parquet_path, key_path, idf_map, min_idf):
         writer.close()
 
 
+def _key_code(*extra):
+    return code_stamp(Path(__file__), *extra)
+
+
 def run_block(cfg, split):
     processed = Path(cfg.data_dir) / "processed"
     reports = Path(cfg.data_dir) / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     idf_path = reports / f"{split}_token_idf.json"
-    if idf_path.exists():
-        idf_map, min_idf = load_token_idf(idf_path)
-        min_idf = cfg.idf_min
+    source_parquets = [processed / f"{split}_source{s}.parquet" for s in (1, 2, 3)]
+    idf_inputs = stamps(source_parquets)
+    idf_code = code_stamp(Path(__file__), Path(ber_normalize.__file__))
+    if is_fresh(idf_path, idf_inputs, {"idf_min": cfg.idf_min}, idf_code):
+        idf_map, _ = load_token_idf(idf_path)
     else:
-        idf_map = compute_token_idf(
-            [
-                processed / f"{split}_source1.parquet",
-                processed / f"{split}_source2.parquet",
-                processed / f"{split}_source3.parquet",
-            ],
-            cfg.idf_min,
-            idf_path,
-            cfg=cfg,
-        )
-        min_idf = cfg.idf_min
+        reason = describe_staleness(idf_path, idf_inputs, {"idf_min": cfg.idf_min}, idf_code)
+        print(f"[block] recomputing token idf for {split}: {reason}", flush=True)
+        idf_map = compute_token_idf(source_parquets, cfg.idf_min, idf_path, cfg=cfg)
+        write_meta(idf_path, idf_inputs, {"idf_min": cfg.idf_min}, idf_code)
+    min_idf = cfg.idf_min
+
     key_dir = Path(cfg.data_dir) / "keys"
     key_dir.mkdir(parents=True, exist_ok=True)
-    s1_keys = key_dir / f"{split}_s1_keys.parquet"
-    if not s1_keys.exists():
-        _write_keys_chunked(processed / f"{split}_source1.parquet", s1_keys, idf_map, min_idf)
+    key_code = _key_code(Path(ber_normalize.__file__), Path(ber_address.__file__), Path(ber_translit.__file__))
+    key_inputs = {**idf_inputs, "idf": stamp(idf_path)}
+    key_config = {"idf_min": cfg.idf_min}
+    plan = [(f"{split}_s1_keys.parquet", processed / f"{split}_source1.parquet")]
+    plan += [
+        (f"{split}_source{s}_keys.parquet", processed / f"{split}_source{s}.parquet")
+        for s in (2, 3)
+    ]
     cand_parts = []
-    for source in (2, 3):
-        part = key_dir / f"{split}_source{source}_keys.parquet"
-        if not part.exists():
-            _write_keys_chunked(processed / f"{split}_source{source}.parquet", part, idf_map, min_idf)
+    for filename, source_parquet in plan:
+        part = key_dir / filename
+        if is_fresh(part, key_inputs, key_config, key_code):
+            cand_parts.append(part)
+            continue
+        reason = describe_staleness(part, key_inputs, key_config, key_code)
+        print(f"[block] rebuilding keys {filename}: {reason}", flush=True)
+        _write_keys_chunked(source_parquet, part, idf_map, min_idf)
+        write_meta(part, key_inputs, key_config, key_code)
         cand_parts.append(part)
+    s1_keys = cand_parts[0]
 
     con = connect(cfg, memory=12e9, temp=50 * 1024 ** 3)
     con.execute(f"CREATE TABLE s1k AS SELECT * FROM read_parquet('{s1_keys.as_posix()}')")
     con.execute(
         "CREATE TABLE candk AS SELECT * FROM read_parquet("
-        f"['{cand_parts[0].as_posix()}','{cand_parts[1].as_posix()}'])"
+        f"['{cand_parts[1].as_posix()}','{cand_parts[2].as_posix()}'])"
     )
     out = Path(cfg.data_dir) / "candidates" / f"{split}_candidates.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
+    # pass_caps/cap are applied in this join, so the candidate set is always rebuilt from
+    # the keys; only the keys above are cached across runs.
     sql = _join_sql("s1k", "candk", cfg.cap, _pass_caps(cfg))
     con.execute(f"COPY ({sql}) TO '{out.as_posix()}' (FORMAT PARQUET)")
     count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{out.as_posix()}')").fetchone()[0]
     con.close()
+    write_meta(
+        out,
+        {"keys": stamp(key_dir)},
+        {"cap": cfg.cap, "pass_caps": _pass_caps(cfg)},
+        code_stamp(Path(__file__)),
+    )
     return {"split": split, "candidates": int(count), "tokens": len(idf_map)}

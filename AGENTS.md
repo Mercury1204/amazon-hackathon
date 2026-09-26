@@ -17,6 +17,25 @@ Keep documentation and logs current as you work:
 - CLI: set `PYTHONPATH=code/business_entity_resolution/src` then run `python -m ber.cli <command> --config code/business_entity_resolution/config.json`. Commands: `prepare`, `block`, `audit`, `features`, `train`, `tune`, `predict`, `outputs`, `evaluate`, `validation`, `loo`, `all`.
 - Run order: `prepare` → `block` → `audit` → `features` → `train` → **`tune`** → `predict` → `outputs`. `tune` is not optional: see the decision contract below.
 
+## Cache provenance (`ber/cache.py`)
+
+Every generated artifact is written beside a `<artifact>.meta.json` sidecar holding a fingerprint of
+what produced it: the identity (size + mtime) of its input files, the config keys that affect it, and
+the source of the modules that compute it. `context` (e.g. which `meta_split` a `valfull` feature set
+borrowed) is recorded but excluded from the fingerprint.
+
+- **Producers recompute** when the fingerprint no longer matches: `block` (token idf, keys),
+  `features` (degree tables, feature parts), `validation` (held-out entity split).
+- **Consumers refuse** rather than silently proceeding: `predict` raises on stale feature parts,
+  naming what changed. Scoring against mismatched features would corrupt the submission invisibly.
+- An artifact with **no** sidecar is treated as stale, never trusted, so pre-fingerprint artifacts
+  cannot be mistaken for current ones.
+- The candidate set is *not* cached across `block` runs: `pass_caps` and `cap` are applied in the
+  join, which always re-runs. Only the keys above it are cached.
+- Consequences: changing `pass_caps` needs only `block`; changing `idf_min` or any blocking-pass code
+  rebuilds the keys; changing `seed`/`val_frac` rebuilds the held-out split; changing the candidate
+  set, pairs, processed records or country TSVs rebuilds the features.
+
 ## Decision contract (`models/threshold.json`)
 
 `train` writes `source: "sampled_4to1"` — the threshold swept on the 4:1 sample, which holds ~4

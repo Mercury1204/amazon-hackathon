@@ -151,3 +151,32 @@ Kept for future reference so the same dead ends are not re-entered.
 - **Fix:** `train` stores it in the decision file, `tune` carries it across its rewrite, and
   `threshold.best_iteration` reads it (falling back to `-1`, i.e. current behaviour, for models
   trained before this change).
+
+## F20 — Degree features were computed on the wrong pair set (train/serve skew)
+- **Symptom:** `s1_degree` meant roughly 5-20 during training (the 4:1 sampled pairs) and up to 200
+  at inference (the full candidate set). Two of the 33 features were therefore describing different
+  quantities on the two sides of the same model.
+- **Cause:** `_phase1_merged` derived both degrees from the split's own `pairs` table, which is the
+  sampled file for train and the full file for valfull and test. Nobody compared the two
+  distributions because each side was internally consistent.
+- **Fix:** `features.candidate_degree_tables` derives both from
+  `candidates/{meta_split}_candidates.parquet` — the true candidate set — and caches them, since each
+  is a pure function of it and small (one row per S1, one per S2/S3). The `valfull` split reads the
+  train candidate set, which is exact: it keeps every candidate row for its held-out entities, so a
+  candidate's degree over that subset equals its degree over the whole set.
+- **Side benefit:** phase 1 no longer aggregates the 250.6M-row test pair table; it reads two small
+  tables instead.
+- **Consequence:** the feature values change, so `features/`, `models/lgbm.txt` and the tuned
+  threshold must all be recomputed. The previously reported 0.8488 was measured with the skewed
+  features and is not comparable to a post-fix run.
+
+## F21 — Every cache path was keyed by split name alone
+- **Symptom:** editing `idf_min` silently reused the key parquet, producing candidates from the old
+  rarity threshold; editing `seed` or `val_frac` silently reused the held-out entity split, which
+  quietly invalidates every validation number computed from it while still printing plausible
+  output. `AGENTS.md` documented "delete `DATA/keys/` to force regeneration" as a manual ritual.
+- **Cause:** no cache recorded what it was built from, so nothing could detect a mismatch.
+- **Fix:** `ber/cache.py` writes a `<artifact>.meta.json` fingerprint of the input files' identity,
+  the relevant config keys, and the source of the computing modules. Producers recompute on mismatch;
+  `predict` refuses stale feature parts. See the cache-provenance section in `AGENTS.md`.
+- **Note:** `pass_caps`/`cap` were never at risk — they are applied in the join, which always re-runs.

@@ -8,6 +8,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ber.cache import describe_staleness, fingerprint, read_context, read_meta
 from ber.duck import connect
 from ber.threshold import best_iteration, load_decision, resolve_decision
 
@@ -28,12 +29,43 @@ def _load_booster(cfg):
 def _feature_sources(cfg, split):
     data = Path(cfg.data_dir)
     parts_dir = data / "tmp" / f"{split}_features"
-    if parts_dir.exists() and any(parts_dir.glob("*.parquet")):
-        return sorted(parts_dir.glob("*.parquet"))
     combined = data / "features" / f"{split}.parquet"
-    if combined.exists():
-        return [combined]
-    raise FileNotFoundError(f"no feature parts or combined features for split={split}")
+    if parts_dir.exists() and any(parts_dir.glob("*.parquet")):
+        source = parts_dir
+    elif combined.exists():
+        source = combined
+    else:
+        raise FileNotFoundError(f"no feature parts or combined features for split={split}")
+
+    meta = read_meta(source)
+    if meta is None:
+        print(
+            f"[predict] warning: {source.name} has no provenance recorded; it was built "
+            f"before fingerprints existed, so staleness cannot be checked. Re-run "
+            f"`ber.cli features --split {split}` if anything upstream has changed since.",
+            flush=True,
+        )
+    else:
+        from ber.features import FEATURE_ORDER, feature_provenance
+
+        # A valfull feature set borrows the train metadata, so recover which split it
+        # was built from rather than assuming it matches its own name.
+        meta_split = read_context(source).get("meta_split", split)
+        inputs, config, code = feature_provenance(cfg, split, meta_split)
+        if meta.get("fingerprint") != fingerprint(inputs, config, code):
+            reason = describe_staleness(source, inputs, config, code)
+            raise ValueError(
+                f"{source.name} is stale for split={split}: {reason}. Re-run "
+                f"`ber.cli features --split {split} --workers 8` before predicting — "
+                f"scoring against mismatched features would silently corrupt the "
+                f"submission."
+            )
+        if list(meta.get("config", {}).get("feature_order", FEATURE_ORDER)) != list(FEATURE_ORDER):
+            raise ValueError(
+                f"{source.name} was built with a different FEATURE_ORDER than the current "
+                f"code; re-run `ber.cli features --split {split}`."
+            )
+    return sorted(parts_dir.glob("*.parquet")) if source == parts_dir else [combined]
 
 
 def predict_parts(cfg, split, booster, features, threshold, out_dir=None, num_iteration=None):
@@ -313,10 +345,13 @@ def run_outputs(cfg, split="test", use_one_to_one=None, threshold_override=None)
 
 
 def run_predict(cfg, split="test", use_one_to_one=None, threshold_override=None, reuse_predictions=False):
-    booster, features, threshold, _ = _load_booster(cfg)
+    # Check feature provenance first: stale features invalidate the whole run, and this
+    # is the cheapest check, so report it before touching the model or the decision.
+    _feature_sources(cfg, split)
     threshold, use_one_to_one, source = resolve_decision(
         cfg, threshold_override=threshold_override, one_to_one_override=use_one_to_one
     )
+    booster, features, _, _ = _load_booster(cfg)
     print(
         f"[predict] model={booster.num_trees()} trees, threshold={threshold} (source={source})",
         flush=True,

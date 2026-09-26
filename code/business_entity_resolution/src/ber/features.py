@@ -9,6 +9,11 @@ import pyarrow.parquet as pq
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import JaroWinkler
 
+import ber.address as ber_address
+import ber.normalize as ber_normalize
+import ber.prepare as ber_prepare
+import ber.translit as ber_translit
+from ber.cache import code_stamp, is_fresh, stamps, write_meta
 from ber.duck import connect
 
 S1_COLS = [
@@ -199,6 +204,56 @@ def _pairs_has_label(path) -> bool:
     return "label" in pq.ParquetFile(path).schema_arrow.names
 
 
+def candidate_degree_tables(cfg, meta_split, con):
+    """Build (or reuse) the candidate-degree tables for a split.
+
+    `s1_degree` and `cand_degree` must describe the *true candidate set*, not the
+    split's own pair file. Training pairs are a 4:1 negative sample while inference
+    pairs are the full candidate set, so deriving the degree from the split's pairs
+    hands the model a feature that means roughly 5-20 at training time and up to 200
+    at inference — a silent train/serve skew on two of the 33 features.
+
+    The valfull split reads the train candidate set, which is correct and exact: it
+    keeps every candidate row for its held-out Source 1 entities, so a candidate's
+    degree over that subset equals its degree over the whole set.
+
+    Both tables are a pure function of the candidate set and small (one row per S1,
+    one per S2/S3), so they are cached and keyed to it.
+    """
+    data = Path(cfg.data_dir)
+    candidates = data / "candidates" / f"{meta_split}_candidates.parquet"
+    sdeg_path = data / "reports" / f"{meta_split}_s1_degree.parquet"
+    cdeg_path = data / "reports" / f"{meta_split}_cand_degree.parquet"
+    if not candidates.exists():
+        raise FileNotFoundError(
+            f"{candidates} is missing; run `ber.cli block --split {meta_split}` first, "
+            f"the candidate degrees are derived from it."
+        )
+    inputs = stamps([candidates])
+    code = code_stamp(Path(__file__))
+    if is_fresh(sdeg_path, inputs, {}, code) and is_fresh(cdeg_path, inputs, {}, code):
+        return sdeg_path, cdeg_path
+
+    src = candidates.as_posix()
+    sdeg_path.parent.mkdir(parents=True, exist_ok=True)
+    con.execute(
+        f"COPY (SELECT s1_id, count(*) AS n FROM read_parquet('{src}') GROUP BY s1_id) "
+        f"TO '{sdeg_path.as_posix()}' (FORMAT PARQUET)"
+    )
+    con.execute(
+        f"COPY (SELECT cand_id, count(*) AS n FROM read_parquet('{src}') GROUP BY cand_id) "
+        f"TO '{cdeg_path.as_posix()}' (FORMAT PARQUET)"
+    )
+    write_meta(sdeg_path, inputs, {}, code)
+    write_meta(cdeg_path, inputs, {}, code)
+    print(
+        f"[features] built candidate degrees for {meta_split}: "
+        f"{sdeg_path.name}, {cdeg_path.name}",
+        flush=True,
+    )
+    return sdeg_path, cdeg_path
+
+
 def _phase1_merged(cfg, split, n_parts=16, meta_split=None):
     meta_split = meta_split or split
     data = Path(cfg.data_dir)
@@ -240,8 +295,9 @@ def _phase1_merged(cfg, split, n_parts=16, meta_split=None):
         "CREATE TEMP TABLE cand AS SELECT x.*, coalesce(c.country, '') AS country "
         f"FROM read_parquet({cand_sql}) x LEFT JOIN country c ON c.entity_id = x.entity_id"
     )
-    con.execute("CREATE TEMP TABLE sdeg AS SELECT s1_id, count(*) AS n FROM pairs GROUP BY s1_id")
-    con.execute("CREATE TEMP TABLE cdeg AS SELECT cand_id, count(*) AS n FROM pairs GROUP BY cand_id")
+    sdeg_path, cdeg_path = candidate_degree_tables(cfg, meta_split, con)
+    con.execute(f"CREATE TEMP TABLE sdeg AS SELECT * FROM read_parquet('{sdeg_path.as_posix()}')")
+    con.execute(f"CREATE TEMP TABLE cdeg AS SELECT * FROM read_parquet('{cdeg_path.as_posix()}')")
 
     label_sel = "p.label," if _pairs_has_label(pairs_path) else ""
     sql = f"""
@@ -313,8 +369,36 @@ def _combine_feature_parts(part_dir, out_path):
     return rows
 
 
+def feature_provenance(cfg, split, meta_split=None):
+    """Inputs and code that determine a split's feature values.
+
+    Includes the candidate set because the degree features are derived from it, so a
+    change in blocking invalidates the features too.
+    """
+    meta_split = meta_split or split
+    data = Path(cfg.data_dir)
+    sources = [
+        data / "pairs" / f"{split}_pairs.parquet",
+        data / "candidates" / f"{meta_split}_candidates.parquet",
+    ]
+    sources += [data / "processed" / f"{meta_split}_source{s}.parquet" for s in (1, 2, 3)]
+    sources += [
+        Path(cfg.dataset_dir) / meta_split / f"{meta_split}_source{s}.tsv"
+        for s in (1, 2, 3)
+    ]
+    code = code_stamp(
+        Path(__file__),
+        Path(ber_normalize.__file__),
+        Path(ber_address.__file__),
+        Path(ber_translit.__file__),
+        Path(ber_prepare.__file__),
+    )
+    return stamps(sources), {"feature_order": list(FEATURE_ORDER)}, code
+
+
 def run_features(cfg, split="train", workers=1, combine=False, n_parts=16, keep_merged=False, meta_split=None):
     data = Path(cfg.data_dir)
+    provenance = feature_provenance(cfg, split, meta_split)
     merged_parts = _phase1_merged(cfg, split, n_parts=n_parts, meta_split=meta_split)
     print(f"[features] phase1 merged parts: {len(merged_parts)}", flush=True)
 
@@ -339,13 +423,17 @@ def run_features(cfg, split="train", workers=1, combine=False, n_parts=16, keep_
         shutil.rmtree(data / "tmp" / f"{split}_merged", ignore_errors=True)
 
     out_path = data / "features" / f"{split}.parquet"
+    inputs, feature_config, code = provenance
+    context = {"meta_split": meta_split or split}
     if combine:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         combined = _combine_feature_parts(feat_dir, out_path)
+        write_meta(out_path, inputs, feature_config, code, context)
         return {
             "rows": combined,
             "columns": len(FEATURE_ORDER) + (3 if _pairs_has_label(data / "pairs" / f"{split}_pairs.parquet") else 2),
             "path": str(out_path),
             "parts": len(tasks),
         }
+    write_meta(feat_dir, inputs, feature_config, code, context)
     return {"rows": rows, "parts": len(tasks), "parts_dir": str(feat_dir)}

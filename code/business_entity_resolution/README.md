@@ -105,6 +105,7 @@ Prebuilt artifacts already in the repo: `models/lgbm.txt`, `models/feature_list.
 src/ber/
   config.py       configuration dataclass + env/path resolution
   duck.py         single DuckDB session factory (memory, threads, spill dir)
+  cache.py        artifact fingerprints for cache invalidation
   io_utils.py     chunked TSV reader and parquet writer
   prepare.py      stage 0: normalization, address parsing, parquet cache
   blocking.py     DuckDB blocking passes and candidate caps
@@ -133,6 +134,23 @@ tests/            pytest suite (run: .venv\Scripts\python.exe -m pytest -q)
 
 Both files contain exactly 1,732,544 rows (one per test Source 1 entity); unmatched entities get an
 empty second column. The official validator reports `PASS`.
+
+## Cache provenance
+
+Generated artifacts carry a `<artifact>.meta.json` sidecar fingerprinting their input files, the
+config keys that affect them, and the source of the modules that compute them. Stages recompute when
+that no longer matches, and `predict` refuses stale feature parts rather than scoring against
+mismatched features. An artifact with no sidecar counts as stale.
+
+Practical consequences:
+
+- editing `pass_caps` / `cap` needs only `block` — those are applied in the join, which always re-runs
+- editing `idf_min` or any blocking-pass code rebuilds the keys (a manual `rm -rf DATA/keys` is no
+  longer needed)
+- editing `seed` or `val_frac` rebuilds the held-out entity split instead of silently reusing the
+  previous holdout
+- changing the candidate set, the pairs, the processed records or the source TSVs invalidates the
+  features, and `predict` says so
 
 ## Tuning notes
 

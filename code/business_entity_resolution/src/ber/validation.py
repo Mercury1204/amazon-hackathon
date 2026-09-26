@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import ber.pairs as ber_pairs
+from ber.cache import code_stamp, describe_staleness, is_fresh, stamp, stamps, write_meta
 from ber.duck import connect
 from ber.pairs import grouped_split
 
@@ -22,16 +24,32 @@ def val_s1_ids_path(cfg):
 
 
 def val_s1_ids(cfg, val_frac=0.2):
+    """Held-out Source 1 entity ids, cached against the split seed and feature set.
+
+    The path is keyed by split name alone, so changing `seed` or `val_frac` used to
+    silently reuse the previous holdout — which would quietly invalidate every
+    validation number computed from it while still producing plausible output.
+    """
     path = val_s1_ids_path(cfg)
-    if path.exists():
-        return pd.read_parquet(path)["s1_id"].to_numpy()
-    frame = pd.read_parquet(
-        Path(cfg.data_dir) / "features" / "train.parquet", columns=["s1_id"]
-    )
-    _, val_mask = grouped_split(frame, val_frac, cfg.seed)
-    ids = frame.loc[val_mask, "s1_id"].drop_duplicates().sort_values().reset_index(drop=True)
-    ids.to_frame("s1_id").to_parquet(path, index=False)
-    return ids.to_numpy()
+    features = Path(cfg.data_dir) / "features" / "train.parquet"
+    inputs = stamps([features])
+    config = {"seed": cfg.seed, "val_frac": val_frac}
+    code = code_stamp(Path(__file__), Path(ber_pairs.__file__))
+    if not is_fresh(path, inputs, config, code):
+        reason = describe_staleness(path, inputs, config, code)
+        print(f"[validation] rebuilding held-out entity split: {reason}", flush=True)
+        frame = pd.read_parquet(features, columns=["s1_id"])
+        _, val_mask = grouped_split(frame, val_frac, cfg.seed)
+        ids = (
+            frame.loc[val_mask, "s1_id"]
+            .drop_duplicates()
+            .sort_values()
+            .reset_index(drop=True)
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ids.to_frame("s1_id").to_parquet(path, index=False)
+        write_meta(path, inputs, config, code)
+    return pd.read_parquet(path)["s1_id"].to_numpy()
 
 
 def build_valfull_pairs(cfg, val_frac=0.2):

@@ -133,3 +133,33 @@ Each entry: decision, context, alternatives, and consequence.
   ID inside a list, S2-/S3- prefixes only); matches-subset-of-candidates is not re-derived because
   both files are built from the same pairs parquet, and `utils/validate_submission.py` re-checks it
   before submission.
+
+## D16 — Candidate-set degrees, not pair-set degrees
+- **Context:** `s1_degree` and `cand_degree` were computed from each split's own `pairs` table. For
+  train that is the 4:1 negative sample; for valfull and test it is the full candidate set. The model
+  was therefore trained on a feature meaning ~5-20 and served it meaning up to 200 (F20).
+- **Decision:** derive both from `candidates/{meta_split}_candidates.parquet`, cached and keyed to
+  it. The `valfull` split reads the train candidate set, which is exact for the same reason its
+  pairs are a faithful subset.
+- **Alternatives:** dropping the two features (loses real signal — a candidate's ambiguity is
+  informative); recomputing degrees inside the model at serving time (not possible with a static
+  feature file); normalising the degree (hides the mismatch rather than removing it).
+- **Consequence:** feature values change, so `features/`, `models/lgbm.txt` and the tuned threshold
+  must be recomputed; the previously reported 0.8488 used the skewed features and is not comparable
+  to a post-fix run. Phase 1 also gets cheaper, since it no longer aggregates the 250.6M-row test
+  pair table.
+
+## D17 — Fingerprint-based cache provenance, recompute on write and refuse on read
+- **Context:** every cache path was keyed by split name alone, so editing `idf_min`, `seed`,
+  `val_frac` or a blocking pass silently reused the previous artifact (F21). The documented remedy
+  was a manual `rm -rf`.
+- **Decision:** `ber/cache.py` fingerprints an artifact's input-file identity (size + mtime, not
+  content — these run to gigabytes), the config keys that affect it, and the source of the computing
+  modules. Producers recompute on mismatch and print the reason; consumers raise. A missing sidecar
+  counts as stale.
+- **Alternatives:** content hashing (unaffordable for a 250M-row parquet read many times per stage);
+  putting a config hash in the cache filename (proliferates files, leaves garbage, and cannot detect
+  a code change); warning instead of failing (the whole point is that these failures are silent).
+- **Consequence:** editing a blocking pass or a feature now costs a rebuild rather than a wrong
+  answer, and `predict` refuses to score against features that no longer match their inputs. The
+  cost is one `stat` per input per stage.
