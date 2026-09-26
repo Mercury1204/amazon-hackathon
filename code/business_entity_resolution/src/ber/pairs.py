@@ -1,8 +1,9 @@
 from pathlib import Path
 
-import duckdb
 import numpy as np
 import pandas as pd
+
+from ber.duck import connect
 
 
 def _explode_truth(gt: pd.DataFrame) -> pd.DataFrame:
@@ -52,12 +53,7 @@ def write_training_pairs(cfg, split="train"):
     gt = (data / "processed" / "train_ground_truth.parquet").as_posix()
     out = data / "pairs" / f"{split}_pairs.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect()
-    con.execute("SET memory_limit='10GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute(f"SET temp_directory='{(data / 'tmp').as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='50GiB'")
+    con = connect(cfg, memory=10e9, temp=50 * 1024 ** 3)
     con.execute(
         f"CREATE TABLE cand AS SELECT s1_id, cand_id, is_s2, pass_id, block_score "
         f"FROM read_parquet('{candidates}')"
@@ -94,12 +90,7 @@ def write_inference_pairs(cfg, split="test"):
     candidates = (data / "candidates" / f"{split}_candidates.parquet").as_posix()
     out = data / "pairs" / f"{split}_pairs.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect()
-    con.execute("SET memory_limit='8GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute(f"SET temp_directory='{(data / 'tmp').as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='50GiB'")
+    con = connect(cfg, memory=8e9, temp=50 * 1024 ** 3)
     con.execute(
         f"COPY (SELECT s1_id, cand_id, is_s2, pass_id, block_score "
         f"FROM read_parquet('{candidates}')) TO '{out.as_posix()}' (FORMAT PARQUET)"

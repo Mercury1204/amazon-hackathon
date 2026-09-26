@@ -2,12 +2,13 @@ import json
 import shutil
 from pathlib import Path
 
-import duckdb
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from ber.duck import connect
 
 
 def _load_booster(cfg):
@@ -76,12 +77,7 @@ def _write_tsv(cfg, split, use_one_to_one, n_buckets=64):
     matching = out_dir / "matching_results.tsv"
     candidate = out_dir / "candidate_pairs.tsv"
 
-    con = duckdb.connect()
-    con.execute("SET memory_limit='8GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute(f"SET temp_directory='{(data / 'tmp').as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='60GiB'")
+    con = connect(cfg, memory=8e9, temp=60 * 1024 ** 3)
     con.execute(
         f"CREATE TEMP TABLE s1list AS SELECT entity_id AS source1_entity_id FROM read_parquet('{s1_parquet}')"
     )

@@ -2,10 +2,10 @@ import json
 import shutil
 from pathlib import Path
 
-import duckdb
 import numpy as np
 import pandas as pd
 
+from ber.duck import connect
 from ber.pairs import grouped_split
 
 SPLIT = "valfull"
@@ -40,12 +40,7 @@ def build_valfull_pairs(cfg, val_frac=0.2):
     candidates = (data / "candidates" / "train_candidates.parquet").as_posix()
     out = data / "pairs" / f"{SPLIT}_pairs.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect()
-    con.execute("SET memory_limit='10GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute(f"SET temp_directory='{(data / 'tmp').as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='50GiB'")
+    con = connect(cfg, memory=10e9, temp=50 * 1024 ** 3)
     con.execute(f"CREATE TEMP TABLE valids AS SELECT s1_id FROM read_parquet('{val_s1_ids_path(cfg).as_posix()}')")
     con.execute(
         f"COPY (SELECT c.s1_id, c.cand_id, c.is_s2, c.pass_id, c.block_score "
@@ -128,12 +123,7 @@ def _score_preds(cfg, preds_glob, lo=0.2, hi=0.95, step=0.025, valids_path=None,
     thresholds = np.round(np.arange(lo, hi + 1e-9, step), 4).tolist()
     n_bins = len(thresholds)
 
-    con = duckdb.connect()
-    con.execute("SET memory_limit='10GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute(f"SET temp_directory='{(data / 'tmp').as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='50GiB'")
+    con = connect(cfg, memory=10e9, temp=50 * 1024 ** 3)
     con.execute(f"CREATE TEMP TABLE valids AS SELECT s1_id FROM read_parquet('{valids_path.as_posix()}')")
     con.execute(
         f"""

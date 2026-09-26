@@ -80,6 +80,22 @@ Each entry: decision, context, alternatives, and consequence.
   A minimal `src/config.json` is included so the packaged pipeline runs as-is.
 - **Consequence:** package is spec-compliant and self-contained; model is reproducible but not shipped.
 
+## D12 — Paths and DuckDB limits come from the environment, not from code
+- **Context:** RULES §6 makes Kaggle the only place training and heavy inference run, but the stages
+  carried 22 hard-coded `SET memory_limit` / `max_temp_directory_size` / `threads` statements
+  written for a 23 GB Windows box, and every path was relative to the repository root.
+- **Decision:** `ber/config.py` resolves the four directories and the four DuckDB limits from
+  `BER_*` environment variables, with the config file as fallback; `ber/duck.py` is the single place
+  a DuckDB session is configured, and each stage passes its previous ceiling as a per-call override.
+- **Alternatives:** editing the config file per environment (not possible for a Kaggle notebook
+  without rewriting the file); keeping the limits in code and patching them per notebook (fragile,
+  22 sites).
+- **Consequence:** the same code runs locally and on Kaggle with only environment changes, and
+  `BER_DUCK_MAX_TEMP` can be lowered to fit Kaggle's ~20 GB `/kaggle/working` instead of failing to
+  spill the local 50-80 GB. The per-stage defaults are unchanged, so no existing run is affected —
+  `test_stage_sql_matches_pre_refactor_strings` pins that equivalence. `BER_DUCK_MEMORY_LIMIT` must
+  be lowered too on a 30 GB Kaggle CPU session.
+
 ## D13 — Unknown config keys are a hard error
 - **Context:** `Config.load` silently dropped any key it did not recognise, so a typo such as
   `pass_capz` in `config.json` quietly fell back to `DEFAULT_PASS_CAPS` in `blocking.py` and changed

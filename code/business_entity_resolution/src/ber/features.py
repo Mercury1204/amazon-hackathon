@@ -2,13 +2,14 @@ import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-import duckdb
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import JaroWinkler
+
+from ber.duck import connect
 
 S1_COLS = [
     "entity_id", "name_norm", "name_fold", "name_roman", "name_tokens", "name_stripped",
@@ -215,12 +216,7 @@ def _phase1_merged(cfg, split, n_parts=16, meta_split=None):
     ]
     country_files = [f.as_posix() for f in country_files if f.exists()]
 
-    con = duckdb.connect()
-    con.execute("SET memory_limit='12GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute(f"SET temp_directory='{(data / 'tmp').as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='80GiB'")
+    con = connect(cfg, memory=12e9, temp=80 * 1024 ** 3)
 
     if country_files:
         files_sql = "[" + ",".join(f"'{f}'" for f in country_files) + "]"

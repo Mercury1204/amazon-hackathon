@@ -2,14 +2,13 @@ import json
 import time
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
+from ber.duck import connect
 from ber.io_utils import read_source
 
-MEMORY_LIMIT = "8GB"
-THREADS = 8
-MAX_TEMP = "50GiB"
+MEMORY_LIMIT = 8e9
+MAX_TEMP = 50 * 1024 ** 3
 
 
 def load_country_map(path) -> dict:
@@ -94,15 +93,7 @@ def _sql_path(path) -> str:
 
 
 def _connect(cfg):
-    con = duckdb.connect()
-    con.execute(f"SET memory_limit='{MEMORY_LIMIT}'")
-    con.execute(f"SET threads={THREADS}")
-    con.execute("SET preserve_insertion_order=false")
-    tmp = Path(cfg.data_dir) / "tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    con.execute(f"SET temp_directory='{_sql_path(tmp)}'")
-    con.execute(f"PRAGMA max_temp_directory_size='{MAX_TEMP}'")
-    return con
+    return connect(cfg, memory=MEMORY_LIMIT, temp=MAX_TEMP)
 
 
 def _truth_sql(gt_path) -> str:

@@ -83,3 +83,26 @@ Kept for future reference so the same dead ends are not re-entered.
 - **Fix:** added name-token prefix-5, street-token prefix-5, and rare-token pair/triple passes and
   widened caps; final train recall **0.8115**. India (0.727) remains the weak spot; raising recall
   further (embedding/LSH fuzzy blocking) is the top future work item.
+
+## F14 — `repr()` emitted a double-quoted SQL string for the DuckDB spill directory
+- **Symptom:** found while centralising the DuckDB session settings. A path containing an
+  apostrophe produced `SET temp_directory="/tmp/o'neil/data/tmp"`, and DuckDB rejected it.
+- **Cause:** Python's `repr()` switches to double quotes when the string contains a single quote.
+  DuckDB follows the Postgres convention where **double quotes delimit identifiers, not strings**,
+  so the statement failed to bind. The previous code interpolated the path into an f-string
+  (`f"SET temp_directory='{tmp.as_posix()}'"`), which never had this problem.
+- **Fix:** `ber/duck.py::_sql_str` always emits a single-quoted literal and doubles any embedded
+  apostrophe. Pinned by `test_apostrophe_in_path_is_escaped`.
+
+## F15 — DuckDB silently truncated a fractional memory limit
+- **Symptom:** after F14's refactor, `memory_limit` came back as 7,945,689,498 bytes when 8,000,000,000
+  was requested — a 0.68% shortfall on every stage, and the same for 10GB and 12GB.
+- **Cause:** the formatter rendered `7.45GiB`, and DuckDB's settings parser requires a unit
+  (`KB`/`MB`/`GB`/`TB` or `KiB`/.../`TiB`; a bare byte count is a parser error) **and keeps only one
+  decimal place**, so `7.45GiB` was stored as `7.4GiB`.
+- **Fix:** `ber/duck.py::format_bytes` now picks the most compact unit in which the value is exact,
+  so the historical `8GB`/`10GB`/`12GB` and `50GiB`/`60GiB`/`80GiB` working points are reproduced
+  byte-for-byte. `test_stage_sql_matches_pre_refactor_strings` pins every stage against the
+  pre-refactor strings so a future formatter change cannot silently move a working point.
+- **Note:** `current_setting('memory_limit')` also *reports* rounded, so verify the emitted SQL
+  string, not the read-back value.

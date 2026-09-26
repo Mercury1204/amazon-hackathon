@@ -45,3 +45,31 @@ and the Python 3.12 venv (`.venv\Scripts\python.exe`).
   full candidate distribution to **0.925**; all submitted outputs use 0.925.
 - The 4:1 number (0.98) is optimistic and must not be quoted as the leaderboard score; see
   `RESULTS.md`.
+
+## 2026-09-26 — Kaggle portability: env-var paths and DuckDB runtime knobs
+
+No pipeline stage was re-run; this is a refactor plus hardening. Motivation: RULES §6 makes Kaggle
+the only place heavy runs happen, but paths were repo-root-relative and 22 DuckDB limits were
+hard-coded for the local 23 GB Windows box.
+
+| Step | Command | Result |
+|---|---|---|
+| Ignore rules | — | `kaggle.json`, `*.kaggle.json`, `credentials.json` (the name Kaggle CLI 2.x actually reads), `.kaggle/`, `.netrc`, `netrc`, `.env`, `.env.*`, `*.pem`, `*.key` added to `.gitignore` **and** `.graphifyignore`; `DATA/kaggle_upload/` staging dir ignored |
+| Path overrides | — | `ber/config.py`: `BER_DATASET_DIR` (aliases `DATA_DIR`, `BER_DATA_DIR`, auto-detect under `/kaggle/input`), `BER_ARTIFACT_DIR`, `BER_MODELS_DIR`, `BER_OUTPUT_DIR`, `BER_ROOT`. Env beats config; `~` expanded; relative paths resolve against `root`; unknown keys rejected (D13); `validate=True` fails fast on a bad `dataset_dir` |
+| Runtime knobs | — | `ber/duck.py::connect` centralises `memory_limit` / `threads` / `temp_directory` / `max_temp_directory_size`; all 22 hard-coded sites across `audit`, `blocking`, `features`, `pairs`, `predict`, `validation` migrated. Knobs: `BER_DUCK_MEMORY_LIMIT` (8GB), `BER_DUCK_THREADS` (8), `BER_DUCK_MAX_TEMP` (50GiB), `BER_DUCK_TMP_DIR` |
+| Tests | `pytest -q` | **81 passed** (was 31). New: `tests/test_config.py` (23), `tests/test_duck.py` (27) |
+| Equivalence proof | — | Every stage emits byte-identical SQL to the pre-refactor strings (`8GB`/`10GB`/`12GB`, `50GiB`/`60GiB`/`80GiB`), pinned by `test_stage_sql_matches_pre_refactor_strings` |
+
+Two bugs were found and fixed during this work, both introduced by the refactor itself and caught
+by testing against real DuckDB rather than a stub — see F14 (`repr()` double-quoted a path, which
+binds as an identifier) and F15 (DuckDB truncates a fractional `memory_limit` to one decimal, so
+`7.45GiB` silently became `7.4GiB`).
+
+Not verified here: `run_block`, `run_prepare`, `write_training_pairs`, `write_inference_pairs`,
+`run_predict` and `evaluate_full_candidates` need the full 2.3 GiB dataset and more disk than this
+machine has, and `train.py`/`predict.py` cannot import on this host because LightGBM needs
+`libomp`. The refactored `run_audit`, `generate_candidates` and `run_features` paths *are* covered
+end-to-end by real DuckDB in `test_audit.py`, `test_blocking.py` and `test_parallel_features.py`.
+
+Dataset integrity re-verified before planning the Kaggle upload: all 7 row counts and file sizes
+match `DATASET.md` exactly, and UTF-8 is intact (Devanagari and French-accented names round-trip).

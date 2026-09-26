@@ -19,7 +19,35 @@ $env:PYTHONPATH="code/business_entity_resolution/src"
 
 `--config` defaults to `code/business_entity_resolution/config.json` when present, otherwise
 `code/business_entity_resolution/src/config.json`, so the packaged copy runs without extra flags.
-Adjust `dataset_dir` in the config to where the challenge data is extracted.
+Adjust `dataset_dir` in the config to where the challenge data is extracted, or override it with
+`BER_DATASET_DIR` (see below).
+
+## Paths and runtime overrides
+
+Every directory and every DuckDB limit can be set from the environment, which takes precedence over
+the config file. Nothing is hard-coded, so the same code runs locally and on Kaggle.
+
+```bash
+export BER_DATASET_DIR=/kaggle/working/er/data        # read-only challenge input (train/, test/)
+export BER_ARTIFACT_DIR=/kaggle/working/er/artifacts  # writable intermediates + spill space
+export BER_MODELS_DIR=/kaggle/working/er/models
+export BER_OUTPUT_DIR=/kaggle/working/er/output
+export BER_DUCK_MEMORY_LIMIT=8GB
+export BER_DUCK_THREADS=8
+export BER_DUCK_MAX_TEMP=18GiB                       # must fit the volume above
+```
+
+- `BER_DATASET_DIR` also answers to `DATA_DIR` and `BER_DATA_DIR` (in that order) and is
+  auto-detected under `/kaggle/input` when unset.
+- `BER_DUCK_MAX_TEMP` caps DuckDB's spill directory. Lower it on Kaggle: `/kaggle/working` is only
+  ~20 GB, so the 50-80 GB local default will fail.
+- Relative paths in the config resolve against `BER_ROOT` (default: the current directory), so
+  commands no longer have to be run from the repository root.
+- `Config.load` raises on an unrecognised config key, and `Config.load(path, validate=True)` fails
+  immediately if `dataset_dir` contains neither `train/` nor `test/` instead of part-way through
+  `prepare`.
+- Keep `BER_ARTIFACT_DIR` distinct from `BER_DATASET_DIR`: on a case-insensitive filesystem a
+  lowercase `data` and an uppercase `DATA` are the same directory.
 
 ## Run order
 
@@ -69,7 +97,9 @@ Prebuilt artifacts already in the repo: `models/lgbm.txt`, `models/feature_list.
 
 ```
 src/ber/
-  config.py       configuration dataclass
+  config.py       configuration dataclass + env/path resolution
+  duck.py         single DuckDB session factory (memory, threads, spill dir)
+  io_utils.py     chunked TSV reader and parquet writer
   prepare.py      stage 0: normalization, address parsing, parquet cache
   blocking.py     DuckDB blocking passes and candidate caps
   audit.py        DuckDB recall/reduction audit (run_audit)
@@ -80,6 +110,10 @@ src/ber/
   postprocess.py  one-to-one assignment filter
   predict.py      streaming inference and submission TSV writers
   evaluate.py     macro-F0.5 metric and local validation marks
+  validation.py   full-candidate held-out and leave-one-country-out scoring
+  normalize.py    name/script/suffix normalization
+  address.py      country-aware address parsing
+  translit.py     Indic romanization
   cli.py          command line entry point
 tests/            pytest suite (run: .venv\Scripts\python.exe -m pytest -q)
 ```

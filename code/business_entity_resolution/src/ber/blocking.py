@@ -6,12 +6,15 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from ber.duck import connect
+
 DEFAULT_PASS_CAPS = {1: 5000, 3: 200, 4: 2000, 5: 1000, 6: 50, 7: 500, 8: 300, 9: 100, 10: 30}
 
 
-def compute_token_idf(files, min_idf, out_path):
-    con = duckdb.connect()
-    con.execute("SET memory_limit='8GB'")
+def compute_token_idf(files, min_idf, out_path, cfg=None):
+    con = connect(cfg) if cfg is not None else duckdb.connect()
+    if cfg is None:
+        con.execute("SET memory_limit='8GB'")
     files_sql = "[" + ",".join("'" + str(f).replace("\\", "/") + "'" for f in files) + "]"
     total = con.execute(f"SELECT COUNT(*) FROM read_parquet({files_sql})").fetchone()[0]
     counts = con.execute(
@@ -160,8 +163,7 @@ FROM ranked WHERE rn <= {int(cap)}
 
 
 def generate_candidates(s1, cands, cfg):
-    con = duckdb.connect()
-    con.execute("SET memory_limit='8GB'")
+    con = connect(cfg)
     idf_map = getattr(cfg, "idf_map", None)
     min_idf = getattr(cfg, "idf_min", 4.0)
     con.register("s1k", block_keys(s1, idf_map, min_idf))
@@ -205,6 +207,7 @@ def run_block(cfg, split):
             ],
             cfg.idf_min,
             idf_path,
+            cfg=cfg,
         )
         min_idf = cfg.idf_min
     key_dir = Path(cfg.data_dir) / "keys"
@@ -219,14 +222,7 @@ def run_block(cfg, split):
             _write_keys_chunked(processed / f"{split}_source{source}.parquet", part, idf_map, min_idf)
         cand_parts.append(part)
 
-    con = duckdb.connect()
-    con.execute("SET memory_limit='12GB'")
-    con.execute("SET threads=8")
-    con.execute("SET preserve_insertion_order=false")
-    tmp = Path(cfg.data_dir) / "tmp"
-    tmp.mkdir(parents=True, exist_ok=True)
-    con.execute(f"SET temp_directory='{tmp.as_posix()}'")
-    con.execute("PRAGMA max_temp_directory_size='50GiB'")
+    con = connect(cfg, memory=12e9, temp=50 * 1024 ** 3)
     con.execute(f"CREATE TABLE s1k AS SELECT * FROM read_parquet('{s1_keys.as_posix()}')")
     con.execute(
         "CREATE TABLE candk AS SELECT * FROM read_parquet("
