@@ -69,7 +69,10 @@ The validator is a gate: exit 0 (`PASS`) required before any submission.
 ## 5. Versioning and git rules
 
 1. **Tags use `major.minor.bugs`** (e.g. `0.1.0`). Bump `bugs` for fixes/docs, `minor` for new pipeline capability, `major` for a submission-ready milestone.
-2. Never commit secrets, tokens, or credentials.
+2. Never commit secrets, tokens, or credentials. `.gitignore` and `.graphifyignore` both exclude
+   `kaggle.json`, `*.kaggle.json`, `credentials.json` (the filename Kaggle CLI 2.x actually uses),
+   `.kaggle/`, `.netrc`, `netrc`, `.env`, `.env.*`, `*.pem`, and `*.key`. Keep those patterns in
+   sync if the list ever grows.
 3. Never hand-edit `graphify-out/` outputs; regenerate them with the graphify pipeline.
 4. Keep `main` in a state where the documented commands work.
 5. Current version: **1.1.0** (leaderboard submission documented; graphify knowledge graph refreshed). Earlier: 1.0.0 = submission-ready package (validator PASS, held-out full-candidate macro F0.5 0.8488); 0.2.0 = Kaggle-only compute rules and cascade C+B design; 0.1.0 = initial docs, EDA and benchmark tooling, knowledge graph.
@@ -78,7 +81,7 @@ The validator is a gate: exit 0 (`PASS`) required before any submission.
 
 1. All training and GPU inference runs on Kaggle: Kaggle Notebooks + Kaggle Datasets only. The local machine is for editing, CPU-only prep/validation, and preparing notebook runs.
 2. Kaggle accelerators only; baseline target is T4 x2 (fp16), L4 x4 as optional speedup. Free tier gives ~30 GPU-h/week (9-12 h session cap, ~20 GB notebook outputs): every GPU stage must cache its artifacts as a versioned Kaggle Dataset output so a re-run never repeats GPU work.
-3. The 7 challenge TSVs are mirrored to a **private** Kaggle Dataset `amz-er-2026-raw` (never public, never in git). Canonical local data stays at `D:\Amazon project\DATA\`; code reads `DATA_DIR` from env/config, no hard-coded paths.
+3. The 7 challenge TSVs are mirrored to a **private** Kaggle Dataset `amz-er-2026-raw` (never public, never in git). Canonical local data stays at `D:\Amazon project\DATA\`; code reads paths from the environment first and the config file second, with no hard-coded paths. Variables: `BER_DATASET_DIR` (read-only challenge input; aliases `DATA_DIR` / `BER_DATA_DIR`, auto-detected under `/kaggle/input`), `BER_ARTIFACT_DIR` (writable intermediates — must be under `/kaggle/working` on Kaggle, never `/kaggle/input`), plus `BER_MODELS_DIR`, `BER_OUTPUT_DIR`, `BER_ROOT`. See the env-var table in `AGENTS.md`.
 4. Runtime model downloads on internet-enabled notebooks are allowed, but every model must be MIT/Apache-2.0 and <=8B params; pin exact model IDs + revisions in requirements/metadata.
 5. Each pipeline stage is one notebook (N1 cleaning, N2 blocking, N3 embed, N4 GBDT, N5 rerank, N6 decision+outputs) with pinned dependency versions; artifacts flow dataset -> notebook -> dataset so runs are reproducible.
 6. `kaggle.json`, notebook secrets, and tokens are never committed.

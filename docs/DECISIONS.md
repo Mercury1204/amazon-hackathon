@@ -79,3 +79,11 @@ Each entry: decision, context, alternatives, and consequence.
 - **Decision:** ship only that; no `models/` in the package (a reproducer retrains from data).
   A minimal `src/config.json` is included so the packaged pipeline runs as-is.
 - **Consequence:** package is spec-compliant and self-contained; model is reproducible but not shipped.
+
+## D13 — Unknown config keys are a hard error
+- **Context:** `Config.load` silently dropped any key it did not recognise, so a typo such as
+  `pass_capz` in `config.json` quietly fell back to `DEFAULT_PASS_CAPS` in `blocking.py` and changed
+  candidate generation with no warning.
+- **Decision:** `Config.load` raises `ValueError` listing the offending keys.
+- **Consequence:** a configuration mistake fails immediately instead of silently producing a
+  different candidate set. Both shipped config files were checked to contain only valid keys.

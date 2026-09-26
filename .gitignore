@@ -6,6 +6,18 @@ DATA/__MACOSX/
 # OS junk
 **/.DS_Store
 
+# Secrets and credentials — never commit (RULES.md §5.2, §6.6)
+kaggle.json
+*.kaggle.json
+credentials.json
+.kaggle/
+.netrc
+netrc
+.env
+.env.*
+*.pem
+*.key
+
 # Python / environment
 .venv/
 __pycache__/
@@ -29,3 +41,6 @@ DATA/features/
 
 # Submission build output
 dist/
+
+# Kaggle upload staging (builds a ~950 MB zip of non-redistributable data)
+DATA/kaggle_upload/

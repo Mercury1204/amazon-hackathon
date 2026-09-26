@@ -4,6 +4,17 @@ graphify-out/
 DATA/__MACOSX/
 DATA/student_resource/dataset/*.tsv
 DATA/student_resource/.DS_Store
+# Secrets and credentials — never enters the corpus
+kaggle.json
+*.kaggle.json
+credentials.json
+.kaggle/
+.netrc
+netrc
+.env
+.env.*
+*.pem
+*.key
 tools/eda_cache/
 tools/eda_stats.json
 tools/bench_results.json
@@ -20,3 +31,4 @@ DATA/pairs/
 DATA/features/
 DATA/reports/
 DATA/tmp/
+DATA/kaggle_upload/

@@ -13,8 +13,32 @@ Keep documentation and logs current as you work:
 - ML code runs on **Python 3.12** via the project venv: `.venv\Scripts\python.exe` (created with `uv`, deps in `code/business_entity_resolution/requirements.txt`).
 - Graphify runs on system Python 3.14 (`python`, not the venv). Keep the environments separate.
 - Harnesses: `opencode` and `mcode` are both agent harnesses used on this repo; keep instructions harness-agnostic.
-- Tests: `.venv\Scripts\python.exe -m pytest -q` from the repo root (19+ tests). `conftest.py` puts `src/` on `sys.path`.
+- Tests: `.venv\Scripts\python.exe -m pytest -q` from the repo root (81 tests). `conftest.py` puts `src/` on `sys.path`.
 - CLI: set `PYTHONPATH=code/business_entity_resolution/src` then run `python -m ber.cli <command> --config code/business_entity_resolution/config.json`. Commands: `prepare`, `block`, `audit`, `features`, `train`, `tune`, `predict`, `outputs`, `all`.
+
+## Environment variables (override `config.json`)
+
+Resolved in `ber.config.Config.load`; **env beats the config file**, and relative
+config paths resolve against `root`. `Config.load` rejects unknown config keys.
+`Config.load(..., validate=True)` additionally fails fast when `dataset_dir` has
+neither `train/` nor `test/`.
+
+| Variable | Overrides | Notes |
+|---|---|---|
+| `BER_DATASET_DIR` | `dataset_dir` | Challenge input, containing `train/` and `test/`. Read-only use only, so a Kaggle `/kaggle/input/...` mount is safe. Aliases: `DATA_DIR`, then `BER_DATA_DIR` (that order). Auto-detected under `/kaggle/input` when unset. |
+| `BER_ARTIFACT_DIR` | `data_dir` | Intermediates root (`processed/`, `keys/`, `candidates/`, `pairs/`, `features/`, `reports/`, `tmp/`). Must be writable — on Kaggle use `/kaggle/working`, **not** `/kaggle/input`. |
+| `BER_MODELS_DIR` | `models_dir` | |
+| `BER_OUTPUT_DIR` | `output_dir` | |
+| `BER_ROOT` | `root` | Base for relative paths. Defaults to the current directory. |
+| `BER_DUCK_MEMORY_LIMIT` | `duck_memory_limit` | Default `8GB`. Accepts `8GB`/`50GiB`/a byte count. |
+| `BER_DUCK_THREADS` | `duck_threads` | Default `8`. |
+| `BER_DUCK_MAX_TEMP` | `duck_max_temp` | Default `50GiB`. **Must fit the volume holding the scratch dir** — Kaggle gives ~20 GB in `/kaggle/working`. |
+| `BER_DUCK_TMP_DIR` | `duck_tmp_dir` | Spill root; scratch is `<dir>/tmp`. Defaults to the artifact dir. |
+
+Do **not** set `BER_ARTIFACT_DIR` to the same path as `BER_DATASET_DIR`: on a
+case-insensitive filesystem `data` and `DATA` collide (see F8). The two
+directories are deliberately distinct — the primary `config.json` uses lowercase
+`data`, the packaged `src/config.json` uses uppercase `DATA`.
 
 ## Pipeline data contracts (all on disk, parquet/JSON)
 
