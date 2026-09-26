@@ -9,14 +9,20 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ber.duck import connect
+from ber.threshold import best_iteration, load_decision, resolve_decision
 
 
 def _load_booster(cfg):
     models = Path(cfg.models_dir)
     booster = lgb.Booster(model_file=str(models / "lgbm.txt"))
     features = json.loads((models / "feature_list.json").read_text(encoding="utf-8"))
-    threshold = float(json.loads((models / "threshold.json").read_text(encoding="utf-8"))["global"])
-    return booster, features, threshold
+    decision = load_decision(cfg)
+    if decision is None:
+        raise FileNotFoundError(
+            f"no decision file at {models / 'threshold.json'}. Run `ber.cli tune` to "
+            f"choose the threshold on the full candidate set."
+        )
+    return booster, features, float(decision["global"]), decision
 
 
 def _feature_sources(cfg, split):
@@ -30,13 +36,15 @@ def _feature_sources(cfg, split):
     raise FileNotFoundError(f"no feature parts or combined features for split={split}")
 
 
-def predict_parts(cfg, split, booster, features, threshold, out_dir=None):
+def predict_parts(cfg, split, booster, features, threshold, out_dir=None, num_iteration=None):
     data = Path(cfg.data_dir)
     pred_dir = Path(out_dir) if out_dir is not None else data / "tmp" / f"{split}_pred"
     if pred_dir.exists():
         shutil.rmtree(pred_dir)
     pred_dir.mkdir(parents=True, exist_ok=True)
     sources = _feature_sources(cfg, split)
+    if num_iteration is None:
+        num_iteration = booster.best_iteration
     total = 0
     for i, part in enumerate(sources):
         writer = None
@@ -45,7 +53,7 @@ def predict_parts(cfg, split, booster, features, threshold, out_dir=None):
             batch_size=2_000_000, columns=features + ["s1_id", "cand_id"]
         ):
             frame = batch.to_pandas()
-            probs = booster.predict(frame[features], num_iteration=booster.best_iteration)
+            probs = booster.predict(frame[features], num_iteration=num_iteration)
             mask = probs >= threshold
             if mask.any():
                 out = pd.DataFrame(
@@ -72,7 +80,8 @@ def _write_tsv(cfg, split, use_one_to_one, n_buckets=64):
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     pairs = (data / "pairs" / f"{split}_pairs.parquet").as_posix()
-    preds = (data / "tmp" / f"{split}_pred" / "*.parquet").as_posix()
+    pred_dir = data / "tmp" / f"{split}_pred"
+    preds = (pred_dir / "*.parquet").as_posix()
     s1_parquet = (data / "processed" / f"{split}_source1.parquet").as_posix()
     matching = out_dir / "matching_results.tsv"
     candidate = out_dir / "candidate_pairs.tsv"
@@ -82,7 +91,15 @@ def _write_tsv(cfg, split, use_one_to_one, n_buckets=64):
         f"CREATE TEMP TABLE s1list AS SELECT entity_id AS source1_entity_id FROM read_parquet('{s1_parquet}')"
     )
 
-    if use_one_to_one:
+    # Nothing above threshold is a legitimate outcome (an over-conservative threshold on a
+    # small or noisy split), and predict_parts then writes no part files at all, so the
+    # prediction glob would match nothing. Probe the directory, not the glob.
+    have_preds = pred_dir.is_dir() and any(pred_dir.glob("*.parquet"))
+
+    if not have_preds:
+        con.execute("CREATE TEMP TABLE matches (s1_id VARCHAR, cand_id VARCHAR, prob DOUBLE)")
+        print("[predict] no candidate pairs above threshold; writing empty match lists", flush=True)
+    elif use_one_to_one:
         con.execute(
             f"""
             CREATE TEMP TABLE matches AS
@@ -127,7 +144,22 @@ def _write_tsv(cfg, split, use_one_to_one, n_buckets=64):
     part_files = []
     for b in range(n_buckets):
         part = parts_dir / f"part_{b:03d}.tsv"
-        glob = (bucket_dir / f"__b={b}").as_posix() + "/*.parquet"
+        bucket = bucket_dir / f"__b={b}"
+        if not bucket.is_dir() or not any(bucket.glob("*.parquet")):
+            # Nothing hashed into this bucket. Every Source 1 entity landing here has
+            # no candidates, so emit its empty row directly rather than reading a glob
+            # that matches no file.
+            con.execute(
+                f"""
+                COPY (
+                    SELECT source1_entity_id, '' AS candidate_entity_ids
+                    FROM s1list WHERE hash(source1_entity_id) % {int(n_buckets)} = {b}
+                ) TO '{part.as_posix()}' (FORMAT CSV, HEADER false, DELIM '\t', QUOTE '')
+                """
+            )
+            part_files.append(part)
+            continue
+        glob = bucket.as_posix() + "/*.parquet"
         con.execute(
             f"""
             COPY (
@@ -173,20 +205,137 @@ def _write_tsv(cfg, split, use_one_to_one, n_buckets=64):
     }
 
 
-def run_predict(cfg, split="test", use_one_to_one=False, threshold_override=None, reuse_predictions=False):
-    booster, features, threshold = _load_booster(cfg)
-    if threshold_override is not None:
-        threshold = float(threshold_override)
-    print(f"[predict] model={booster.num_trees()} trees, threshold={threshold}", flush=True)
+def check_outputs(cfg, split):
+    """Bounded invariant checks on the two written TSVs.
+
+    Covers the scorer-rejection rules that are cheap to verify: one row per test
+    Source 1 entity, no duplicate S1 rows, no repeated ID inside a list, and
+    S2-/S3- prefixes only. Matches-subset-of-candidates is not re-derived here
+    because both files are built from the same pairs parquet, so it holds by
+    construction; `utils/validate_submission.py` re-checks it before submission.
+    """
+    data = Path(cfg.data_dir)
+    matching = (Path(cfg.output_dir) / "matching_results.tsv").as_posix()
+    candidate = (Path(cfg.output_dir) / "candidate_pairs.tsv").as_posix()
+    s1_parquet = (data / "processed" / f"{split}_source1.parquet").as_posix()
+
+    con = connect(cfg)
+    expected = con.execute(f"SELECT COUNT(*) FROM read_parquet('{s1_parquet}')").fetchone()[0]
+    read_matching = (
+        f"read_csv('{matching}', delim='\\t', header=true, all_varchar=true)"
+    )
+    rows, distinct_s1, singletons = con.execute(
+        f"SELECT COUNT(*), COUNT(DISTINCT source1_entity_id), "
+        f"COUNT(*) FILTER (WHERE matched_entity_ids = '') FROM {read_matching}"
+    ).fetchone()
+    dup_lists, bad_prefix, self_matches, bad_ids = con.execute(
+        f"""
+        SELECT COUNT(*) FILTER (WHERE n_ids <> n_uniq),
+               COALESCE(SUM(n_bad_prefix), 0),
+               COALESCE(SUM(n_self), 0),
+               COALESCE(SUM(n_empty), 0)
+        FROM (
+            SELECT source1_entity_id,
+                   COUNT(*) AS n_ids,
+                   COUNT(DISTINCT mid) AS n_uniq,
+                   COUNT(*) FILTER (WHERE mid = '') AS n_empty,
+                   COUNT(*) FILTER (WHERE mid NOT LIKE 'S2-%' AND mid NOT LIKE 'S3-%') AS n_bad_prefix,
+                   COUNT(*) FILTER (WHERE mid LIKE 'S1-%') AS n_self
+            FROM (
+                SELECT source1_entity_id,
+                       UNNEST(string_split(matched_entity_ids, ',')) AS mid
+                FROM {read_matching} WHERE matched_entity_ids <> ''
+            )
+            GROUP BY source1_entity_id
+        )
+        """
+    ).fetchone()
+    cand_rows = con.execute(
+        f"SELECT COUNT(*) FROM read_csv('{candidate}', delim='\\t', header=true, all_varchar=true)"
+    ).fetchone()[0]
+    con.close()
+
+    problems = []
+    if rows != expected:
+        problems.append(f"matching_results.tsv has {rows} rows, expected {expected} (one per test S1)")
+    if distinct_s1 != rows:
+        problems.append(f"matching_results.tsv has {rows - distinct_s1} duplicate source1_entity_id rows")
+    if dup_lists:
+        problems.append(f"{dup_lists} row(s) repeat an ID inside matched_entity_ids")
+    if bad_prefix:
+        problems.append(f"{bad_prefix} ID(s) lack an S2-/S3- prefix")
+    if self_matches:
+        problems.append(f"{self_matches} Source-1 self-match(es) in matched_entity_ids")
+    if bad_ids:
+        problems.append(f"{bad_ids} empty ID(s) inside a non-empty matched_entity_ids")
+    if cand_rows != expected:
+        problems.append(f"candidate_pairs.tsv has {cand_rows} rows, expected {expected}")
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "expected_rows": int(expected),
+        "matching_rows": int(rows),
+        "candidate_rows": int(cand_rows),
+        "singletons": int(singletons),
+        "non_singleton_rows": int(rows - singletons),
+    }
+
+
+def run_outputs(cfg, split="test", use_one_to_one=None, threshold_override=None):
+    """Write the submission TSVs from cached predictions, without re-scoring.
+
+    Separating this from `run_predict` lets the two files be regenerated after a
+    threshold or one-to-one change without re-scoring every candidate pair.
+    """
+    threshold, one_to_one, source = resolve_decision(
+        cfg, threshold_override=threshold_override, one_to_one_override=use_one_to_one
+    )
+    pred_dir = Path(cfg.data_dir) / "tmp" / f"{split}_pred"
+    if not pred_dir.exists() or not any(pred_dir.glob("*.parquet")):
+        raise FileNotFoundError(
+            f"no cached predictions in {pred_dir}. Run `ber.cli predict --split {split}` first."
+        )
+    print(
+        f"[outputs] split={split} threshold={threshold} (source={source}) "
+        f"one_to_one={one_to_one} from {pred_dir}",
+        flush=True,
+    )
+    stats = _write_tsv(cfg, split, one_to_one)
+    stats["checks"] = check_outputs(cfg, split)
+    stats["use_one_to_one"] = one_to_one
+    stats["threshold"] = threshold
+    stats["threshold_source"] = source
+    if not stats["checks"]["ok"]:
+        raise ValueError(
+            "output invariants violated: " + "; ".join(stats["checks"]["problems"])
+        )
+    return stats
+
+
+def run_predict(cfg, split="test", use_one_to_one=None, threshold_override=None, reuse_predictions=False):
+    booster, features, threshold, _ = _load_booster(cfg)
+    threshold, use_one_to_one, source = resolve_decision(
+        cfg, threshold_override=threshold_override, one_to_one_override=use_one_to_one
+    )
+    print(
+        f"[predict] model={booster.num_trees()} trees, threshold={threshold} (source={source})",
+        flush=True,
+    )
     data = Path(cfg.data_dir)
     pred_dir = data / "tmp" / f"{split}_pred"
     if reuse_predictions and pred_dir.exists() and any(pred_dir.glob("*.parquet")):
         print("[predict] reusing existing prediction parts", flush=True)
         n_pred = None
     else:
-        pred_dir, n_pred = predict_parts(cfg, split, booster, features, threshold)
+        n_iter = best_iteration(cfg)
+        pred_dir, n_pred = predict_parts(
+            cfg, split, booster, features, threshold, num_iteration=n_iter
+        )
+        if n_iter != booster.best_iteration:
+            print(f"[predict] using best_iteration={n_iter} of {booster.num_trees()} trees", flush=True)
     stats = _write_tsv(cfg, split, use_one_to_one)
     stats["pairs_above_threshold"] = int(n_pred) if n_pred is not None else "reused"
     stats["use_one_to_one"] = bool(use_one_to_one)
     stats["threshold"] = threshold
+    stats["threshold_source"] = source
     return stats

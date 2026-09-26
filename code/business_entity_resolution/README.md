@@ -64,14 +64,20 @@ export BER_DUCK_MAX_TEMP=18GiB                       # must fit the volume above
 # 4a. Training pairs + pairwise features for train (parallel, 8 workers)
 .venv\Scripts\python.exe -m ber.cli features --split train --workers 8 --combine
 
-# 4b. Train the LightGBM matcher and tune the F0.5 threshold
+# 4b. Train the LightGBM matcher
 .venv\Scripts\python.exe -m ber.cli train
+
+# 4c. Re-tune the decision on the FULL candidate set and persist it (do not skip)
+.venv\Scripts\python.exe -m ber.cli tune --workers 8
 
 # 5. Inference pairs + parallel features for test
 .venv\Scripts\python.exe -m ber.cli features --split test --workers 8
 
-# 6. Predict, apply one-to-one, write output/*.tsv
-.venv\Scripts\python.exe -m ber.cli predict --split test --one-to-one --threshold 0.925
+# 6. Score the test candidates, apply the tuned decision, write output/*.tsv
+.venv\Scripts\python.exe -m ber.cli predict --split test
+
+# 6b. Rewrite the two TSVs from the cached scores (after a threshold/one-to-one change)
+.venv\Scripts\python.exe -m ber.cli outputs --split test
 
 # 7. Validate (must print PASS)
 .venv\Scripts\python.exe DATA\student_resource\utils\validate_submission.py `
@@ -106,9 +112,10 @@ src/ber/
   features.py     two-phase parallel pairwise feature generation
   pairs.py        training/inference pair construction and grouped split
   train.py        LightGBM training + threshold tuning
-  threshold.py    vectorized macro-F0.5 entity scorer and sweep
+  threshold.py    vectorized macro-F0.5 scorer, threshold sweep, decision file
+  tune.py         full-candidate threshold tuning; writes models/threshold.json
   postprocess.py  one-to-one assignment filter
-  predict.py      streaming inference and submission TSV writers
+  predict.py      streaming inference, output TSV writers, output invariant checks
   evaluate.py     macro-F0.5 metric and local validation marks
   validation.py   full-candidate held-out and leave-one-country-out scoring
   normalize.py    name/script/suffix normalization
@@ -129,10 +136,18 @@ empty second column. The official validator reports `PASS`.
 
 ## Tuning notes
 
+- **The decision is `models/threshold.json`, and `tune` owns it.** `train` writes
+  `source: "sampled_4to1"` — the threshold swept on the 4:1 sample, which is far too low for
+  inference — and `predict` **refuses** to run on it, pointing at `tune`. `tune` reads (or re-runs)
+  the full-candidate validation and rewrites the file with `source: "full_candidates"`, the chosen
+  threshold, the winning method (`one_to_one` or `threshold_only`), the macro F0.5 it was chosen at,
+  and the `best_iteration` the threshold is only meaningful at. Override deliberately with
+  `--threshold`, or force the method with `--one-to-one` / `--no-one-to-one`; with neither flag the
+  persisted decision decides.
+- `predict` scores the candidates (expensive); `outputs` rewrites the two TSVs from the cached
+  scores and re-checks the output invariants. So changing only the threshold does not require
+  re-scoring 250M pairs. `outputs` exits non-zero if any invariant fails.
 - Per-pass block caps are in `config.json` (`pass_caps`); per-S1 cap is `cap`.
-- **Threshold must be tuned on the full candidate distribution, not the 4:1 sample.** On the full
-  candidates for the held-out S1 groups, the optimum moved from 0.675 (4:1 sample) to **0.925**;
-  all submission outputs use 0.925.
 - Reported scores:
   - 4:1 sampled split (grouped), one-to-one: macro F0.5 **0.9807** — *optimistic, not comparable to
     the leaderboard* (see `DATA/reports/eval_marks.json`).

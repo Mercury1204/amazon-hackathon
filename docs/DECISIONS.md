@@ -103,3 +103,33 @@ Each entry: decision, context, alternatives, and consequence.
 - **Decision:** `Config.load` raises `ValueError` listing the offending keys.
 - **Consequence:** a configuration mistake fails immediately instead of silently producing a
   different candidate set. Both shipped config files were checked to contain only valid keys.
+
+## D14 — `predict` refuses a sampled-sweep threshold instead of defaulting to it
+- **Context:** F12 established that the 4:1-sampled threshold (0.70) is materially wrong for the
+  full candidate distribution (0.925). The only thing protecting the submission was the operator
+  remembering to pass `--threshold 0.925`, and `train` rewrote `models/threshold.json` with the bad
+  value on every retrain.
+- **Decision:** the decision file records its own provenance in a `source` field.
+  `sampled_4to1` is rejected by `threshold.resolve_decision` unless the caller passes
+  `--threshold` explicitly; `full_candidates` (written only by `tune`) is accepted. The file also
+  records the winning method, so `--one-to-one` / `--no-one-to-one` become tri-state and the
+  persisted choice applies when neither is passed.
+- **Alternatives:** keeping the sampled default and relying on documentation (the status quo, which
+  is how the footgun survived); dropping the sampled sweep entirely (it is still the cheapest
+  signal available at train time, and it usefully records the size of the sampling gap).
+- **Consequence:** the wrong threshold can no longer be used by accident, and the operator error
+  becomes an actionable message instead of a silently worse submission. Pinned by
+  `test_predict_refuses_a_sampled_sweep_threshold`.
+
+## D15 — `predict` scores, `outputs` writes
+- **Context:** `run_predict` did both jobs, so changing only the threshold or the one-to-one flag
+  meant re-scoring 250.6M candidate pairs. Task 12 of the implementation plan also listed `outputs`
+  as a distinct command that produces the two TSVs.
+- **Decision:** split them. `predict` streams features and caches per-part scores; `outputs`
+  aggregates the cached scores into `matching_results.tsv` / `candidate_pairs.tsv` and then verifies
+  the scorer-rejection invariants, exiting non-zero on any violation.
+- **Consequence:** a threshold or assignment change costs seconds instead of a full scoring pass.
+  The verified invariants are the cheap ones (one row per test S1, no duplicate S1 rows, no repeated
+  ID inside a list, S2-/S3- prefixes only); matches-subset-of-candidates is not re-derived because
+  both files are built from the same pairs parquet, and `utils/validate_submission.py` re-checks it
+  before submission.

@@ -215,7 +215,7 @@ def evaluate_full_candidates(cfg, val_frac=0.2, workers=8, reuse=False):
         print(run_features(cfg, SPLIT, workers=workers, combine=False, meta_split="train"), flush=True)
     pred_dir = data / "tmp" / f"{SPLIT}_pred"
     if not reuse or not pred_dir.exists() or not any(pred_dir.glob("*.parquet")):
-        booster, features, _ = _load_booster(cfg)
+        booster, features, _, _ = _load_booster(cfg)
         predict_parts(cfg, SPLIT, booster, features, 0.2)
     report = _score_preds(cfg, (data / "tmp" / f"{SPLIT}_pred" / "*.parquet").as_posix())
     report["note"] = "full candidates, held-out S1 groups; test-like conditions, no France labels"
@@ -290,7 +290,7 @@ def evaluate_loo(cfg, val_frac=0.2):
         report["val_country"] = val_country
         reports[f"train_{train_country}_val_{val_country}"] = report
 
-    booster, features, _ = _load_booster(cfg)
+    booster, features, _, _ = _load_booster(cfg)
     for country in ("us", "india"):
         mask_country = np.array([country_by_s1.get(sid, "") == country for sid in ids])
         subset_path = _reports(cfg) / f"{SPLIT}_s1_ids_{country}.parquet"

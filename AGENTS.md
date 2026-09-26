@@ -13,8 +13,22 @@ Keep documentation and logs current as you work:
 - ML code runs on **Python 3.12** via the project venv: `.venv\Scripts\python.exe` (created with `uv`, deps in `code/business_entity_resolution/requirements.txt`).
 - Graphify runs on system Python 3.14 (`python`, not the venv). Keep the environments separate.
 - Harnesses: `opencode` and `mcode` are both agent harnesses used on this repo; keep instructions harness-agnostic.
-- Tests: `.venv\Scripts\python.exe -m pytest -q` from the repo root (81 tests). `conftest.py` puts `src/` on `sys.path`.
-- CLI: set `PYTHONPATH=code/business_entity_resolution/src` then run `python -m ber.cli <command> --config code/business_entity_resolution/config.json`. Commands: `prepare`, `block`, `audit`, `features`, `train`, `tune`, `predict`, `outputs`, `all`.
+- Tests: `.venv\Scripts\python.exe -m pytest -q` from the repo root (101 tests). `conftest.py` puts `src/` on `sys.path`. `-m "not slow"` skips the end-to-end CLI fixture.
+- CLI: set `PYTHONPATH=code/business_entity_resolution/src` then run `python -m ber.cli <command> --config code/business_entity_resolution/config.json`. Commands: `prepare`, `block`, `audit`, `features`, `train`, `tune`, `predict`, `outputs`, `evaluate`, `validation`, `loo`, `all`.
+- Run order: `prepare` → `block` → `audit` → `features` → `train` → **`tune`** → `predict` → `outputs`. `tune` is not optional: see the decision contract below.
+
+## Decision contract (`models/threshold.json`)
+
+`train` writes `source: "sampled_4to1"` — the threshold swept on the 4:1 sample, which holds ~4
+negatives per positive against ~135 candidates per entity at inference and therefore lands far too
+low (0.70 versus 0.925; see F12). `predict` **refuses** to run on a `sampled_4to1` decision and
+tells you to run `ber.cli tune`. `tune` reads (or, with `--force`, re-runs) the full-candidate
+validation and rewrites the file with `source: "full_candidates"`, the chosen threshold, the winning
+method, the macro F0.5 it was chosen at, and `best_iteration` — the tree count the threshold is only
+meaningful at, which LightGBM does **not** persist inside `lgbm.txt`. Escape hatches:
+`--threshold <v>` (explicit opt-in) and `--one-to-one` / `--no-one-to-one`; with neither flag the
+persisted decision decides. `predict` scores the candidates; `outputs` rewrites the two TSVs from
+those cached scores and re-checks the output invariants, so a threshold change needs no re-scoring.
 
 ## Environment variables (override `config.json`)
 

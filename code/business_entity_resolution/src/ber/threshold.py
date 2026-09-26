@@ -1,5 +1,87 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
+DECISION_FILE = "threshold.json"
+
+# A threshold swept on the 4:1 sampled split is optimistic and must not be used for
+# inference (see FAILURES_AND_FIXES F12); only a full-candidate sweep is authoritative.
+SAMPLED = "sampled_4to1"
+FULL_CANDIDATES = "full_candidates"
+
+
+def decision_path(cfg) -> Path:
+    return Path(cfg.models_dir) / DECISION_FILE
+
+
+def save_decision(cfg, threshold, use_one_to_one, source, **extra) -> dict:
+    payload = {
+        "global": float(threshold),
+        "use_one_to_one": bool(use_one_to_one),
+        "source": source,
+    }
+    payload.update(extra)
+    path = decision_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def load_decision(cfg):
+    path = decision_path(cfg)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def best_iteration(cfg, default=-1):
+    """How many trees to use at inference.
+
+    LightGBM does not persist `best_iteration` inside the model file, so a booster loaded
+    with `model_file` reports -1 and `predict()` then silently uses every tree that was
+    built -- including any extra trees early stopping appended after the optimum the
+    threshold was tuned at. `train` records the value in the decision file for this reason.
+    """
+    decision = load_decision(cfg)
+    if not decision:
+        return default
+    value = decision.get("best_iteration")
+    return int(value) if value is not None else default
+
+
+def resolve_decision(cfg, threshold_override=None, one_to_one_override=None):
+    """Combine the persisted decision with any explicit override.
+
+    A threshold swept on the 4:1 sample is rejected unless the caller passes one
+    explicitly: it is materially too low for the full candidate distribution
+    (FAILURES_AND_FIXES F12), and silently honouring it ships a worse submission.
+    """
+    decision = load_decision(cfg)
+    if decision is None:
+        if threshold_override is None:
+            raise FileNotFoundError(
+                f"no decision file at {decision_path(cfg)}. Run `ber.cli tune`, or pass "
+                f"--threshold explicitly."
+            )
+        threshold, source = float(threshold_override), "cli"
+    else:
+        threshold = float(decision["global"])
+        source = decision.get("source", "unknown")
+    if threshold_override is not None:
+        threshold, source = float(threshold_override), "cli"
+    if source == SAMPLED:
+        raise ValueError(
+            f"the persisted threshold {threshold} came from a {SAMPLED} sweep and is not "
+            f"valid for inference. Run `ber.cli tune` to re-tune on the full candidate "
+            f"set, or pass --threshold {threshold} to override deliberately."
+        )
+    if one_to_one_override is None:
+        use_one_to_one = bool(decision.get("use_one_to_one", False)) if decision else False
+    else:
+        use_one_to_one = bool(one_to_one_override)
+    return threshold, use_one_to_one, source
 
 
 def entity_f05(groups, labels, predicted, thresholds=None):

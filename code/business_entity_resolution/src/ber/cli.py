@@ -13,6 +13,23 @@ def _default_config():
     return str(primary if primary.exists() else fallback)
 
 
+def _resolve_split(requested, command, natural, allowed):
+    """Resolve --split for a command that works on one split at a time.
+
+    The CLI default is "both", which is meaningless for these, so each command
+    declares the split it acts on when unspecified plus the splits it accepts.
+    """
+    if requested == "both":
+        return natural
+    if requested not in allowed:
+        raise SystemExit(
+            f"ber {command}: --split {requested} is not supported (accepts "
+            f"{', '.join(sorted(allowed))}). Use `ber.cli block --split {requested}` "
+            f"to build that split."
+        )
+    return requested
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ber")
     parser.add_argument(
@@ -22,9 +39,11 @@ def main(argv=None):
     parser.add_argument("--config", default=_default_config())
     parser.add_argument("--split", default="both", choices=["train", "test", "both"])
     parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--one-to-one", action="store_true", dest="one_to_one")
+    parser.add_argument("--one-to-one", action="store_true", dest="one_to_one", default=None)
+    parser.add_argument("--no-one-to-one", action="store_false", dest="one_to_one")
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--reuse-predictions", action="store_true", dest="reuse_predictions")
+    parser.add_argument("--force", action="store_true", help="tune: re-run the sweep instead of reusing the report")
     parser.add_argument("--combine", action="store_true")
     parser.add_argument("--keep-merged", action="store_true", dest="keep_merged")
     args = parser.parse_args(argv)
@@ -39,11 +58,11 @@ def main(argv=None):
     if args.command in ("audit", "all"):
         from ber.audit import run_audit
 
-        print(run_audit(cfg, "train"))
+        print(run_audit(cfg, _resolve_split(args.split, "audit", "train", {"train"})))
     if args.command in ("features", "all"):
         from ber.features import run_features
 
-        split = "train" if args.split == "both" else args.split
+        split = _resolve_split(args.split, "features", "train", {"train", "test"})
         if split == "test":
             from ber.pairs import write_inference_pairs
 
@@ -65,16 +84,38 @@ def main(argv=None):
         from ber.train import train_model
 
         print(train_model(cfg))
+    if args.command in ("tune",):
+        from ber.tune import tune_threshold
+
+        print(
+            tune_threshold(
+                cfg,
+                workers=args.workers,
+                reuse=args.reuse_predictions,
+                force=args.force,
+            )
+        )
     if args.command in ("predict",):
         from ber.predict import run_predict
 
         print(
             run_predict(
                 cfg,
-                "test",
+                _resolve_split(args.split, "predict", "test", {"test"}),
                 use_one_to_one=args.one_to_one,
                 threshold_override=args.threshold,
                 reuse_predictions=args.reuse_predictions,
+            )
+        )
+    if args.command in ("outputs",):
+        from ber.predict import run_outputs
+
+        print(
+            run_outputs(
+                cfg,
+                _resolve_split(args.split, "outputs", "test", {"test"}),
+                use_one_to_one=args.one_to_one,
+                threshold_override=args.threshold,
             )
         )
     if args.command in ("evaluate",):

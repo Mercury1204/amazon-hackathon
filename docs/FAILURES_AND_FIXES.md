@@ -106,3 +106,48 @@ Kept for future reference so the same dead ends are not re-entered.
   pre-refactor strings so a future formatter change cannot silently move a working point.
 - **Note:** `current_setting('memory_limit')` also *reports* rounded, so verify the emitted SQL
   string, not the read-back value.
+
+## F16 — `tune` and `outputs` were advertised CLI commands that did nothing
+- **Symptom:** `ber.cli tune` and `ber.cli outputs` were both listed in `choices` (and in
+  `AGENTS.md`) but no branch handled them, so they exited 0 having done nothing. A reader following
+  the documented run order would believe the threshold had been tuned when it had not.
+- **Cause:** they were planned in `docs/superpowers/plans/2026-09-25-er-pipeline.md` (Task 12/13) and
+  wired into `choices`, but never implemented.
+- **Fix:** `ber/tune.py` re-tunes on the full candidate distribution and persists the decision;
+  `predict.run_outputs` writes the two TSVs from cached scores and verifies the output invariants.
+  `--split` is now resolved explicitly per command, so `outputs --split train` fails instead of
+  silently writing test files. Covered by `tests/test_tune.py`, `tests/test_decision.py` and
+  `tests/test_end_to_end.py`.
+
+## F17 — Output writer emitted an all-singleton submission when nothing cleared the threshold
+- **Symptom:** found by the new end-to-end test. `predict` reported `pairs_above_threshold: 656` and
+  wrote prediction parts, yet printed "no candidate pairs above threshold" and wrote
+  `matching_results.tsv` with **every** row empty.
+- **Cause:** an existence probe tested `Path(preds).is_dir()` where `preds` is the glob string
+  `.../test_pred/*.parquet`. A glob is never a directory, so the probe was always false and the
+  writer always took the empty-matches branch.
+- **Why it mattered:** an all-singleton submission is *format-valid* — `utils/validate_submission.py`
+  reported **PASS** on it — so the submission gate would not have caught it. Only an assertion on
+  the match content exposed it.
+- **Fix:** probe the prediction *directory* (`pred_dir.is_dir() and any(pred_dir.glob("*.parquet"))`).
+  `tests/test_end_to_end.py` now asserts a non-empty match list survives the validator.
+
+## F18 — `_write_tsv` crashed on any candidate bucket that hashed to no rows
+- **Symptom:** `IOException: No files found that match the pattern .../test_cand_buckets/__b=0/*.parquet`.
+- **Cause:** `_write_tsv` buckets candidates into 64 partitions and then reads each
+  `__b={b}/*.parquet` glob in a Python loop. DuckDB errors on a glob matching no file, so any empty
+  bucket aborted the run. Invisible on the real test set (1.73M entities populate all 64 buckets),
+  fatal on any smaller split.
+- **Fix:** when a bucket directory has no parquet files, emit its Source 1 rows with empty candidate
+  lists directly instead of reading the glob.
+
+## F19 — Inference used every built tree, not the tuned `best_iteration`
+- **Symptom:** `booster.best_iteration` is `-1` for a booster loaded with `lgb.Booster(model_file=...)`,
+  because LightGBM does not persist that attribute inside `lgbm.txt`. `predict` and `evaluate` passed
+  it straight to `predict(num_iteration=...)`, so LightGBM used **all** trees — including any extra
+  trees early stopping appended after the optimum — while the threshold had been tuned at
+  `best_iteration`.
+- **Cause:** `train` recorded `best_iteration` in `training_metrics.json`, which nothing read back.
+- **Fix:** `train` stores it in the decision file, `tune` carries it across its rewrite, and
+  `threshold.best_iteration` reads it (falling back to `-1`, i.e. current behaviour, for models
+  trained before this change).

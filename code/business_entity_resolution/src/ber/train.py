@@ -7,7 +7,7 @@ import pandas as pd
 
 from ber.features import FEATURE_ORDER
 from ber.pairs import grouped_split
-from ber.threshold import sweep_threshold
+from ber.threshold import SAMPLED, save_decision, sweep_threshold
 
 
 def train_model(cfg, split="train"):
@@ -61,12 +61,22 @@ def train_model(cfg, split="train"):
     models.mkdir(parents=True, exist_ok=True)
     booster.save_model(str(models / "lgbm.txt"))
     (models / "feature_list.json").write_text(json.dumps(FEATURE_ORDER, indent=2), encoding="utf-8")
-    (models / "threshold.json").write_text(
-        json.dumps({"global": threshold, "use_one_to_one": False}, indent=2), encoding="utf-8"
+    decision = save_decision(
+        cfg,
+        threshold,
+        use_one_to_one=False,
+        source=SAMPLED,
+        best_iteration=int(booster.best_iteration),
+        note="swept on the 4:1 sampled split; not valid for inference",
+    )
+    phase(
+        f"[train] decision written: threshold={decision['global']} "
+        f"source={decision['source']} -- run `ber.cli tune` before predicting"
     )
     metrics = {
         "val_macro_f05": score,
         "threshold": threshold,
+        "threshold_source": SAMPLED,
         "best_iteration": int(booster.best_iteration),
         "train_pairs": int(train_mask.sum()),
         "val_pairs": int(val_mask.sum()),

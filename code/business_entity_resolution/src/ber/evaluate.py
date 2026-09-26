@@ -46,7 +46,7 @@ def evaluate_marks(cfg, split="train"):
 
     from ber.features import FEATURE_ORDER
     from ber.pairs import grouped_split
-    from ber.threshold import entity_f05
+    from ber.threshold import best_iteration, entity_f05
 
     data = Path(cfg.data_dir)
     frame = pd.read_parquet(
@@ -55,7 +55,9 @@ def evaluate_marks(cfg, split="train"):
     )
     train_mask, val_mask = grouped_split(frame, 0.2, cfg.seed)
     booster = lgb.Booster(model_file=str(Path(cfg.models_dir) / "lgbm.txt"))
-    probs = booster.predict(frame.loc[val_mask, FEATURE_ORDER], num_iteration=booster.best_iteration)
+    probs = booster.predict(
+        frame.loc[val_mask, FEATURE_ORDER], num_iteration=best_iteration(cfg)
+    )
     groups = frame.loc[val_mask, "s1_id"].to_numpy()
     cands = frame.loc[val_mask, "cand_id"].to_numpy()
     labels = frame.loc[val_mask, "label"].to_numpy()

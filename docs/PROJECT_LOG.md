@@ -73,3 +73,32 @@ end-to-end by real DuckDB in `test_audit.py`, `test_blocking.py` and `test_paral
 
 Dataset integrity re-verified before planning the Kaggle upload: all 7 row counts and file sizes
 match `DATASET.md` exactly, and UTF-8 is intact (Devanagari and French-accented names round-trip).
+
+## 2026-09-27 — `tune` and `outputs` implemented; decision provenance enforced
+
+| Step | Command | Result |
+|---|---|---|
+| Ignore rules | — | `kaggle.json`, `*.kaggle.json`, `credentials.json` (the name Kaggle CLI 2.x actually reads), `.kaggle/`, `.netrc`, `netrc`, `.env`, `.env.*`, `*.pem`, `*.key` added to `.gitignore` **and** `.graphifyignore`; `DATA/kaggle_upload/` staging dir ignored |
+| Path overrides | — | `ber/config.py`: `BER_DATASET_DIR` (aliases `DATA_DIR`, `BER_DATA_DIR`, auto-detect under `/kaggle/input`), `BER_ARTIFACT_DIR`, `BER_MODELS_DIR`, `BER_OUTPUT_DIR`, `BER_ROOT`. Env beats config; `~` expanded; relative paths resolve against `root`; unknown keys rejected (D13); `validate=True` fails fast on a bad `dataset_dir` |
+| Runtime knobs | — | `ber/duck.py::connect` centralises `memory_limit` / `threads` / `temp_directory` / `max_temp_directory_size`; all 22 hard-coded sites across `audit`, `blocking`, `features`, `pairs`, `predict`, `validation` migrated. Knobs: `BER_DUCK_MEMORY_LIMIT` (8GB), `BER_DUCK_THREADS` (8), `BER_DUCK_MAX_TEMP` (50GiB), `BER_DUCK_TMP_DIR` |
+| `tune` | `ber.cli tune --workers 8` | Re-tunes on the full candidate distribution and rewrites `models/threshold.json` with `source: full_candidates`, the winning method, the macro F0.5, and `best_iteration`. Reuses `eval_full_candidates.json` unless `--force` |
+| `outputs` | `ber.cli outputs --split test` | Rewrites both TSVs from cached scores and verifies the output invariants; non-zero exit on violation |
+| Guardrail | `ber.cli predict --split test` | Now **refuses** a `sampled_4to1` threshold (F16/D14); `--threshold` is the explicit opt-in |
+| Split safety | `ber.cli outputs --split train` | Rejected instead of silently writing test files |
+| Tests | `pytest -q` | **101 passed** (was 31). New: `test_config.py` (23), `test_duck.py` (27), `test_decision.py` (10), `test_tune.py` (7), `test_end_to_end.py` (3) |
+| Equivalence proof | — | Every stage emits byte-identical SQL to the pre-refactor strings (`8GB`/`10GB`/`12GB`, `50GiB`/`60GiB`/`80GiB`), pinned by `test_stage_sql_matches_pre_refactor_strings` |
+| End-to-end gate | `pytest -m slow` | Generates a 30/18-entity fixture, shells out to the real CLI for the whole run order, and gates on `utils/validate_submission.py` — **PASS**, including `--check-ids` |
+
+Four bugs were found and fixed during this work; F14/F15 came from the DuckDB refactor and F16–F19
+from wiring the two commands. F17 is the notable one: an existence probe tested a *glob* with
+`Path.is_dir()`, so `predict` wrote an all-singleton `matching_results.tsv` that the official
+validator still reported **PASS** on. Only asserting on the match content caught it.
+
+Not verified here: `run_block`, `run_prepare`, `write_training_pairs` and
+`evaluate_full_candidates` were exercised only on the generated fixture, never against the full
+2.3 GiB dataset, because this machine has ~20 GiB free. The refactored `run_audit`,
+`generate_candidates` and `run_features` paths are covered end-to-end by real DuckDB in
+`test_audit.py`, `test_blocking.py` and `test_parallel_features.py`.
+
+Dataset integrity re-verified before planning the Kaggle upload: all 7 row counts and file sizes
+match `DATASET.md` exactly, and UTF-8 is intact (Devanagari and French-accented names round-trip).
