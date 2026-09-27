@@ -69,18 +69,37 @@ def _scratch_dir(cfg):
     return Path(data_dir) / "tmp"
 
 
+def _explicit(cfg, field) -> bool:
+    """True when the operator set this knob deliberately.
+
+    `Config.load` records the names of the fields it read from the environment, so an
+    unset knob is distinguishable from one explicitly set to its own default value.
+    """
+    return field in getattr(cfg, "duck_explicit", frozenset())
+
+
+def _resolve(cfg, field, stage_default, fallback):
+    """Precedence: explicit knob > per-stage default > module fallback."""
+    if _explicit(cfg, field):
+        return getattr(cfg, field)
+    if stage_default is not None:
+        return stage_default
+    value = getattr(cfg, field, None)
+    return fallback if value is None else value
+
+
 def connect(cfg, memory=None, temp=None):
     """Open a DuckDB session honouring the Config runtime knobs.
 
-    `memory` and `temp` are the per-stage ceilings the stages used to hard-code;
-    pass None to take the Config value (which is itself env-overridable).
+    `memory` and `temp` are the per-stage ceilings the stages used to hard-code. They
+    apply only as *defaults*: an explicit `BER_DUCK_*` environment variable or config
+    value always wins, because the whole point of the knobs is to re-tune a session for
+    a machine without editing code. Passing a per-call value unconditionally here is
+    what previously let the legacy 50 GiB spill ceiling override a deliberate
+    `BER_DUCK_MAX_TEMP=20GiB` and fill the disk.
     """
-    memory_limit = getattr(cfg, "duck_memory_limit", DEFAULT_MEMORY_LIMIT)
-    if memory is not None:
-        memory_limit = memory
-    max_temp = getattr(cfg, "duck_max_temp", DEFAULT_MAX_TEMP)
-    if temp is not None:
-        max_temp = temp
+    memory_limit = _resolve(cfg, "duck_memory_limit", memory, DEFAULT_MEMORY_LIMIT)
+    max_temp = _resolve(cfg, "duck_max_temp", temp, DEFAULT_MAX_TEMP)
     threads = int(getattr(cfg, "duck_threads", DEFAULT_THREADS))
 
     scratch = _scratch_dir(cfg)

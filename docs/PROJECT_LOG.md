@@ -152,3 +152,10 @@ once candidates exist; and `processed/` is written only by `prepare`, so it can 
 re-mounted read-only. DuckDB is configured with a 6 GB memory ceiling and 18 GiB spill cap, which is deliberately
 inverted from the local box: Kaggle offers ~30 GB RAM against 20 GB of disk, so a *lower* memory ceiling would force
 *more* spilling to the scarcer resource.
+
+**Disk topology correction.** `/kaggle/working` and `/kaggle/lib` are the *same* 20 GB
+filesystem (`/dev/loop2`), so Kaggle's own libraries consume part of the budget that looked
+like 20 GB free; the real figure was ~13 GB. The `57 GB` quoted earlier was the root overlay
+(8.0 TB, 1.1 TB available), not the working volume. The correct split is persistent artifacts
+on `/kaggle/working` and DuckDB scratch on the overlay via `BER_DUCK_TMP_DIR`, which keeps
+spill off the crowded volume. Two `block` attempts were lost to this before it was measured.

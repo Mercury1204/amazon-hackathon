@@ -5,37 +5,6 @@ import pytest
 
 from ber.config import Config, _parse_size
 
-ALL_ENV = [
-    "BER_DATASET_DIR", "DATA_DIR", "BER_DATA_DIR", "BER_ARTIFACT_DIR", "BER_MODELS_DIR",
-    "BER_OUTPUT_DIR", "BER_ROOT", "BER_DUCK_MEMORY_LIMIT", "BER_DUCK_THREADS",
-    "BER_DUCK_MAX_TEMP", "BER_DUCK_TMP_DIR",
-]
-
-
-@pytest.fixture()
-def clean_env(monkeypatch):
-    for name in ALL_ENV:
-        monkeypatch.delenv(name, raising=False)
-    return monkeypatch
-
-
-@pytest.fixture()
-def config_file(tmp_path):
-    def _write(**overrides):
-        payload = {
-            "dataset_dir": "DATA/student_resource/dataset",
-            "data_dir": "data",
-            "models_dir": "code/business_entity_resolution/models",
-            "output_dir": "output",
-            "seed": 42,
-            "cap": 200,
-        }
-        payload.update(overrides)
-        path = tmp_path / "config.json"
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        return path
-    return _write
-
 
 def test_env_var_beats_config_file(clean_env, config_file, tmp_path):
     clean_env.setenv("BER_ARTIFACT_DIR", str(tmp_path / "artifacts"))

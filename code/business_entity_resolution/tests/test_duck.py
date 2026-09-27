@@ -135,6 +135,56 @@ def test_apostrophe_in_path_is_escaped(statements, tmp_path):
     assert 'SET temp_directory="' not in joined
 
 
+BLOCKING_MEMORY = 12e9          # what blocking.run_block passes
+BLOCKING_TEMP = 50 * 1024 ** 3  # the legacy spill ceiling it passes
+
+
+def _statements_for(cfg):
+    """Run connect() with blocking's per-call ceilings against a stubbed duckdb."""
+    import ber.duck as duck_mod
+
+    sink = []
+    real = duck_mod.duckdb.connect
+    duck_mod.duckdb.connect = lambda *a, **kw: FakeCon(sink)
+    try:
+        duck_mod.connect(cfg, memory=BLOCKING_MEMORY, temp=BLOCKING_TEMP)
+    finally:
+        duck_mod.duckdb.connect = real
+    return "\n".join(sink)
+
+
+def test_explicit_knob_beats_a_per_stage_default(clean_env, config_file):
+    """A stage passes the ceiling it used to hard-code. An operator who sets
+    BER_DUCK_MAX_TEMP must still win, or the knob is decorative: this is how a
+    deliberate 20GiB cap was silently overridden by the legacy 50GiB and filled the disk."""
+    clean_env.setenv("BER_DUCK_MAX_TEMP", "20GiB")
+    joined = _statements_for(Config.load(config_file()))
+    assert "PRAGMA max_temp_directory_size='20GiB'" in joined
+    assert "50GiB" not in joined
+
+
+def test_explicit_memory_knob_beats_a_per_stage_default(clean_env, config_file):
+    clean_env.setenv("BER_DUCK_MEMORY_LIMIT", "4GB")
+    joined = _statements_for(Config.load(config_file()))
+    assert "SET memory_limit='4GB'" in joined
+    assert "12GB" not in joined
+
+
+def test_unset_knob_still_uses_the_per_stage_default(clean_env, config_file):
+    """Back-compatibility: with no knob set, blocking keeps its 12GB/50GiB point."""
+    cfg = Config.load(config_file())
+    assert cfg.duck_explicit == frozenset()
+    joined = _statements_for(cfg)
+    assert "PRAGMA max_temp_directory_size='50GiB'" in joined
+    assert "SET memory_limit='12GB'" in joined
+
+
+def test_knob_in_the_config_file_counts_as_explicit(config_file):
+    cfg = Config.load(config_file(duck_max_temp=8 * 1024 ** 3))
+    assert "duck_max_temp" in cfg.duck_explicit
+    assert "PRAGMA max_temp_directory_size='8GiB'" in _statements_for(cfg)
+
+
 def test_duck_typed_cfg_without_data_dir_creates_no_scratch(monkeypatch, tmp_path):
     """The unit tests hand in stand-in configs; those must not spill into a
     stray ./tmp next to the caller."""

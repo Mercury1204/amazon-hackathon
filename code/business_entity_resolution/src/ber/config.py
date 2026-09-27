@@ -116,6 +116,7 @@ class Config:
     duck_threads: int = 8
     duck_max_temp: int = 50 * 1024 ** 3
     duck_tmp_dir: Path = None
+    duck_explicit: frozenset = frozenset()
 
     def __post_init__(self):
         object.__setattr__(self, "lgbm_params", self.lgbm_params or {})
@@ -171,6 +172,9 @@ class Config:
 
         overrides = dict(_DIR_ENV)
         overrides.update(_DUCK_ENV)
+        # A knob counts as deliberate if it appears in the config file OR in the
+        # environment, so a stage's own default never silently overrides it.
+        explicit_duck = {k for k in _DUCK_ENV if k in payload}
         for field, env_names in overrides.items():
             value = _first_env(env_names)
             if value is None and field == "dataset_dir":
@@ -179,6 +183,8 @@ class Config:
                 continue
             if field in known:
                 payload[field] = _cast_env(field, value, env_names[0])
+                if field in _DUCK_ENV:
+                    explicit_duck.add(field)
             else:
                 raise ValueError(f"{path}: no config field named {field!r} for env var {env_names[0]}")
 
@@ -191,5 +197,5 @@ class Config:
             else:
                 kwargs[key] = value
 
-        cfg = cls(root=root, **kwargs)
+        cfg = cls(root=root, duck_explicit=frozenset(explicit_duck), **kwargs)
         return cfg.validate() if validate else cfg

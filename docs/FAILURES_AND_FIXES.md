@@ -180,3 +180,22 @@ Kept for future reference so the same dead ends are not re-entered.
   the relevant config keys, and the source of the computing modules. Producers recompute on mismatch;
   `predict` refuses stale feature parts. See the cache-provenance section in `AGENTS.md`.
 - **Note:** `pass_caps`/`cap` were never at risk — they are applied in the join, which always re-runs.
+
+## F22 — `BER_DUCK_MAX_TEMP` was silently ignored by every stage
+- **Symptom:** on Kaggle, `ber.cli block train` died with
+  `Out of Memory Error: ... (49.9 GiB/50.0 GiB used). This limit was set by the
+  'max_temp_directory_size' setting` — even though `BER_DUCK_MAX_TEMP=20GiB` was set and
+  confirmed in the resolved config dump. An earlier attempt with a `20GiB` cap had already
+  failed with `No space left on device`.
+- **Cause:** each stage passes its former hard-coded ceiling as a per-call argument
+  (`blocking.py:241` passes `temp=50 * 1024**3`), and `duck.connect` gave the per-call value
+  priority over the Config/env value. So the env knob could never take effect — the knob was
+  decorative for exactly the stages that needed it. The two different errors (50 GiB spill
+  exhausted, then a 20 GiB cap that never applied) were the same bug seen twice.
+- **Fix:** precedence is now explicit knob > per-stage default > module fallback, with
+  `Config.load` recording which duck knobs were set deliberately (`duck_explicit`, covering
+  both the environment and the config file). An unset knob still falls through to the
+  historical per-stage value, so local behaviour is unchanged.
+- **Note:** the underlying disk pressure was real and separate — see the `/kaggle/working` +
+  `/kaggle/lib` shared-filesystem finding in `PROJECT_LOG.md`. The fix makes the knob honest;
+  `BER_DUCK_TMP_DIR` is what actually relieves the pressure by moving spill off that volume.
