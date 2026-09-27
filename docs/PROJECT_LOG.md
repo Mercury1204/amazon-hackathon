@@ -124,3 +124,31 @@ all produced with the skewed degree features. A full recompute — `features` ->
 `predict` -> `outputs` — is required before any number here is quoted again. That recompute is best
 done as the first Kaggle run, which is why these two fixes were made before the data upload
 completed rather than after.
+
+## 2026-09-27 — Kaggle N1 (`prepare`) completed on the Kaggle base image
+
+| Step | Result |
+|---|---|
+| Dataset mount | `/kaggle/input/datasets/mercury147/amz-er-2026-raw` (private, read-only), 3 levels deep. Auto-detect had globbed at fixed depth 1-2 and missed it; fixed in `51d922c` |
+| Code | `git clone` + `git checkout 51d922c` (pinned SHA, so the notebook records exactly which commit ran) |
+| Environment | **Deviation:** ran on the Kaggle base image, not `requirements.txt` — pandas 2.3.3, numpy 2.0.2, lightgbm 4.6.0, duckdb 1.3.2, pyarrow 25.0.1, rapidfuzz 3.14.6, plus `indic-transliteration==2.3.82` (the only package the base image lacked) |
+| Verified | 126/126 tests pass on that exact stack; all 14 DuckDB SQL constructs the pipeline uses verified working on duckdb 1.3.2 (the pin is 1.5.5) |
+| `prepare` | 24,206,512 rows written to `artifacts/processed/` = 4.3 GB. **All 7 row counts match `DATASET.md` exactly** — dataset upload confirmed intact |
+
+**On the version deviation.** `RULES.md §6.5` asks for pinned versions, so this is recorded rather than silently accepted. It was
+not a shortcut: an earlier attempt to force the pins produced a mangled numpy (`cannot import name '_center'` — 2.5.3 `.py`
+files layered over 2.0.2 `.so` binaries) that could not be repaired in place. The base-image stack was measured to be
+compatible rather than assumed to be, and the Kaggle run's numbers are therefore **not bit-comparable** to the local
+0.8488. Re-running the local stack is the way to restore strict comparability.
+
+Also trimmed `requirements.txt` to the packages `src/ber/` actually imports. `jellyfish` was pinned but imported nowhere
+in the repository and is removed. `xgboost` is imported only by `tools/bench_gbdt.py` (lazily) and is demoted to a
+comment, because it pulls `nvidia-nccl-cu13` — a ~305 MB GPU library that is dead weight on a CPU notebook and a real
+cost against a 20 GB `/kaggle/working`. `RULES.md §3.7` keeps XGBoost as the documented drop-in, so it stays installable.
+
+**Disk budget for the remaining stages.** `/kaggle/working` is 20 GB, of which 4.3 GB is `processed/`. Two structural
+facts make the cascade necessary rather than optional: `keys/` is read only by `run_block` itself, so it is disposable
+once candidates exist; and `processed/` is written only by `prepare`, so it can be promoted to a versioned dataset and
+re-mounted read-only. DuckDB is configured with a 6 GB memory ceiling and 18 GiB spill cap, which is deliberately
+inverted from the local box: Kaggle offers ~30 GB RAM against 20 GB of disk, so a *lower* memory ceiling would force
+*more* spilling to the scarcer resource.

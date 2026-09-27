@@ -1,11 +1,21 @@
+# Runtime dependencies for the ber pipeline (src/ber/).
+# This is the exact set the pipeline imports; install with:
+#   python -m pip install -r requirements.txt
 pandas==3.0.6
 pyarrow==25.0.1
 numpy==2.5.3
-scikit-learn==1.9.1
 lightgbm==4.7.0
-xgboost==3.4.1
 rapidfuzz==3.14.6
 duckdb==1.5.5
 indic-transliteration==2.3.82
-jellyfish==1.2.1
+
+# Test-only. Not imported by src/ber/.
 pytest==9.1.1
+
+# Benchmark-only, imported lazily by tools/bench_gbdt.py and never by the pipeline
+# (RULES.md §3.7 keeps XGBoost as the documented drop-in). Kept out of the block above
+# because xgboost pulls nvidia-nccl-cu13, a ~305 MB GPU library that is dead weight on
+# a CPU notebook. Install explicitly if you want to reproduce tools/bench_results.json:
+#   python -m pip install xgboost==3.4.1 scikit-learn==1.9.1
+#
+# jellyfish was removed: it was pinned here but imported nowhere in the repository.
