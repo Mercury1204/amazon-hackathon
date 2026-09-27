@@ -153,6 +153,59 @@ def test_validate_passes_with_train_dir(clean_env, config_file, tmp_path):
     assert Config.load(config_file(), validate=True).cap == 200
 
 
+def _fake_mount(base, relative):
+    """Create a minimal mounted-dataset tree at base/relative."""
+    root = base / relative
+    for split in ("train", "test"):
+        (root / split).mkdir(parents=True, exist_ok=True)
+        (root / split / f"{split}_source1.tsv").write_text("entity_id\n", encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("layout", [
+    "amz-er-2026-raw",                          # older sessions
+    "datasets/mercury147/amz-er-2026-raw",       # current sessions
+    "datasets/mercury147/amz-er-2026-raw/nested/extra",
+])
+def test_kaggle_autodetect_finds_both_mount_layouts(tmp_path, layout):
+    """The mount depth is not stable across Kaggle sessions; depth-1 and depth-2 globs
+    missed the current /kaggle/input/datasets/<owner>/<slug> layout entirely."""
+    from ber.config import _kaggle_dataset_dir
+
+    base = tmp_path / "input"
+    base.mkdir()
+    expected = _fake_mount(base, layout)
+    assert _kaggle_dataset_dir(base) == expected
+
+
+def test_kaggle_autodetect_requires_both_splits(tmp_path):
+    from ber.config import _kaggle_dataset_dir
+
+    base = tmp_path / "input"
+    (base / "code-dataset" / "train").mkdir(parents=True)
+    (base / "code-dataset" / "train" / "train_source1.tsv").write_text("x\n", encoding="utf-8")
+    assert _kaggle_dataset_dir(base) is None
+
+
+def test_kaggle_autodetect_prefers_the_complete_dataset(tmp_path):
+    from ber.config import _kaggle_dataset_dir
+
+    base = tmp_path / "input"
+    (base / "aaa-partial" / "train").mkdir(parents=True)
+    (base / "aaa-partial" / "train" / "train_source1.tsv").write_text("x\n", encoding="utf-8")
+    expected = _fake_mount(base, "zzz-complete")
+    assert _kaggle_dataset_dir(base) == expected
+
+
+def test_kaggle_autodetect_returns_none_for_empty_mount(tmp_path):
+    from ber.config import _kaggle_dataset_dir
+
+    base = tmp_path / "input"
+    base.mkdir()
+    assert _kaggle_dataset_dir(base) is None
+    assert _kaggle_dataset_dir(tmp_path / "absent") is None
+
+
 def test_kaggle_autodetect_inert_without_kaggle_input(clean_env, config_file):
     from ber.config import _kaggle_dataset_dir
     from pathlib import Path as P

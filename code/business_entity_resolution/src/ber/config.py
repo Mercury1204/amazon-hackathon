@@ -42,21 +42,28 @@ def _first_env(names):
     return None
 
 
-def _kaggle_dataset_dir():
+def _kaggle_dataset_dir(base=None):
     """Locate the mounted challenge dataset when running inside Kaggle.
 
-    Kaggle mounts session inputs read-only under /kaggle/input, so the caller
-    must not point data_dir there; only dataset_dir is auto-detected.
+    Kaggle mounts session inputs read-only, so only `dataset_dir` may point there;
+    `data_dir` must stay under /kaggle/working. The mount layout is not stable --
+    older sessions used /kaggle/input/<slug>, current ones
+    /kaggle/input/datasets/<owner>/<slug> -- so glob recursively instead of guessing
+    depths. A directory counts only if it holds both splits, so a mounted code
+    dataset that happens to contain a `train/` directory cannot win.
     """
-    base = Path("/kaggle/input")
+    base = Path(base or "/kaggle/input")
     if not base.is_dir():
         return None
+    found = []
     for split in ("train", "test"):
-        hits = sorted(base.glob(f"*/{split}/{split}_source1.tsv"))
-        hits += sorted(base.glob(f"*/*/{split}/{split}_source1.tsv"))
-        if hits:
-            parent = hits[0].parent
-            return parent.parent if parent.name == split else parent
+        for hit in sorted(base.glob(f"**/{split}/{split}_source1.tsv")):
+            candidate = hit.parent.parent if hit.parent.name == split else hit.parent
+            if candidate not in found:
+                found.append(candidate)
+    for candidate in found:
+        if (candidate / "train").is_dir() and (candidate / "test").is_dir():
+            return candidate
     return None
 
 
