@@ -199,3 +199,27 @@ Kept for future reference so the same dead ends are not re-entered.
 - **Note:** the underlying disk pressure was real and separate — see the `/kaggle/working` +
   `/kaggle/lib` shared-filesystem finding in `PROJECT_LOG.md`. The fix makes the knob honest;
   `BER_DUCK_TMP_DIR` is what actually relieves the pressure by moving spill off that volume.
+
+## F23 — notebook carried two `%%writefile run.py` cells; `prepare` silently no-op'd
+- **Symptom:** `run.py prepare` printed `RUN_OK` and exited 0, yet
+  `artifacts/processed/` stayed empty at 4.0K. The following `block train` then died with
+  `IO Error: No files found that match the pattern ".../processed/train_source1.parquet"`.
+  Three earlier attempts were spent re-running `prepare` against a wrapper that never worked.
+- **Cause:** the notebook had **two** `%%writefile /kaggle/working/run.py` cells, one after the
+  other. The second replaced the first. The first handled only `block` and `audit` and had its
+  `run_prepare` call commented out, so `prepare` matched no branch and fell through to a bare
+  `print("RUN_OK")`. The `RUN_OK` string is the fingerprint of that stale version — its presence
+  proved the newer dispatcher had not been written yet. Out-of-order cell execution is enough to
+  select the wrong copy; nothing in the output distinguished success from no-op.
+- **Aggravating factor:** `indic-transliteration` was installed in a *later* cell than the one
+  running `prepare`, but `ber.prepare` imports `ber.translit`, which imports it at module scope.
+  The stale wrapper masked this too, by never importing `ber.prepare`. Reordering alone would
+  have traded the silent no-op for a `ModuleNotFoundError`.
+- **Fix:** the wrapper now lives in git as `kaggle/run.py` and dispatches through
+  `ber.cli.main`, so an unknown command fails loudly instead of printing success. The notebook
+  is declarative — no cell writes an executable. Paths are env-overridable so the wrapper can be
+  smoke-tested off Kaggle.
+- **Verified locally** against a miniature dataset: `prepare` → `block --split train` →
+  `block --split test` → `audit` all produce artifacts, and a repeat `block` reuses the cached
+  keys. This also caught a latent trap: `block` takes `--split train`, **not** a positional
+  `train`, so the old hand-rolled `run_block(cfg, sys.argv[2])` form and the CLI form disagree.
